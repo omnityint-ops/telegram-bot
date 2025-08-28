@@ -9,12 +9,18 @@ app = FastAPI()
 
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 
+@app.get("/")
+async def root():
+    # простой healthcheck для Render/браузера
+    return {"ok": True}
+
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
     # Проверка секрета из заголовка Telegram (рекомендуется)
     if WEBHOOK_SECRET:
         if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
             raise HTTPException(status_code=401, detail="Invalid secret")
+
     data = await request.json()
     update = Update.model_validate(data)
     await dp.feed_update(bot, update)
