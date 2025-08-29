@@ -93,37 +93,37 @@ class DB:
         self._setup()
 
     def _setup(self):
-    cur = self.conn.cursor()
-    cur.execute("PRAGMA journal_mode=WAL;")
-    cur.execute("PRAGMA foreign_keys=ON;")
+        cur = self.conn.cursor()
+        cur.execute("PRAGMA journal_mode=WAL;")
+        cur.execute("PRAGMA foreign_keys=ON;")
 
     # --- базовые таблицы ---
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        balance INTEGER NOT NULL DEFAULT 0
-    );
-    """)
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS queue (
-        user_id INTEGER PRIMARY KEY,
-        stake   INTEGER NOT NULL
-    );
-    """)
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS matches (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        p1_id INTEGER NOT NULL,
-        p2_id INTEGER,
-        stake INTEGER NOT NULL DEFAULT 10,
-        p1_paid INTEGER NOT NULL DEFAULT 0,
-        p2_paid INTEGER NOT NULL DEFAULT 0,
-        p1_paid_src TEXT,
-        p2_paid_src TEXT,
-        state INTEGER NOT NULL DEFAULT 0,   -- MatchState
-        winner_id INTEGER
-    );
-    """)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            balance INTEGER NOT NULL DEFAULT 0
+        );
+        """)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS queue (
+            user_id INTEGER PRIMARY KEY,
+            stake   INTEGER NOT NULL
+        );
+        """)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS matches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            p1_id INTEGER NOT NULL,
+            p2_id INTEGER,
+            stake INTEGER NOT NULL DEFAULT 10,
+            p1_paid INTEGER NOT NULL DEFAULT 0,
+            p2_paid INTEGER NOT NULL DEFAULT 0,
+            p1_paid_src TEXT,
+            p2_paid_src TEXT,
+            state INTEGER NOT NULL DEFAULT 0,   -- MatchState
+            winner_id INTEGER
+        );   
+        """)
 
     # --- миграции ---
     def ensure_col(table, col, ddl):
@@ -137,6 +137,21 @@ class DB:
 
     # ВАЖНО: сначала зафиксировать ALTER TABLE,
     # чтобы дальше UPDATE точно видел новую колонку
+    self.conn.commit()
+
+    # 2) проставляем корректные состояния для старых записей
+    #    (если колонка только что добавлена или была с default=0)
+    cur.execute("""
+        UPDATE matches
+        SET state = CASE
+            WHEN winner_id IS NOT NULL        THEN 3  -- FINISHED
+            WHEN p2_id IS NULL                THEN 0  -- WAITING_OPPONENT
+            WHEN p1_paid=1 AND p2_paid=1      THEN 2  -- ACTIVE
+            ELSE 1                                  -- WAITING_PAYMENT
+        END
+        WHERE state IS NULL OR state=0
+    """)
+
     self.conn.commit()
 
     # 2) проставляем корректные состояния для старых записей
