@@ -126,48 +126,48 @@ class DB:
         """)
 
     # --- миграции ---
-    def ensure_col(table, col, ddl):
-        cur.execute(f"PRAGMA table_info({table})")
-        cols = [r[1] for r in cur.fetchall()]
-        if col not in cols:
-            cur.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+        def ensure_col(table, col, ddl):
+            cur.execute(f"PRAGMA table_info({table})")
+            cols = [r[1] for r in cur.fetchall()]
+            if col not in cols:
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
     # 1) добавляем колонку state при необходимости
-    ensure_col("matches", "state", "INTEGER NOT NULL DEFAULT 0")
+        ensure_col("matches", "state", "INTEGER NOT NULL DEFAULT 0")
 
     # ВАЖНО: сначала зафиксировать ALTER TABLE,
     # чтобы дальше UPDATE точно видел новую колонку
-    self.conn.commit()
+        self.conn.commit()
 
     # 2) проставляем корректные состояния для старых записей
     #    (если колонка только что добавлена или была с default=0)
-    cur.execute("""
-        UPDATE matches
-        SET state = CASE
-            WHEN winner_id IS NOT NULL        THEN 3  -- FINISHED
-            WHEN p2_id IS NULL                THEN 0  -- WAITING_OPPONENT
-            WHEN p1_paid=1 AND p2_paid=1      THEN 2  -- ACTIVE
-            ELSE 1                                  -- WAITING_PAYMENT
-        END
-        WHERE state IS NULL OR state=0
-    """)
+        cur.execute("""
+            UPDATE matches
+            SET state = CASE
+                WHEN winner_id IS NOT NULL        THEN 3  -- FINISHED
+                WHEN p2_id IS NULL                THEN 0  -- WAITING_OPPONENT
+                WHEN p1_paid=1 AND p2_paid=1      THEN 2  -- ACTIVE
+                ELSE 1                                  -- WAITING_PAYMENT
+            END
+            WHERE state IS NULL OR state=0
+        """)
 
-    self.conn.commit()
+        self.conn.commit()
 
     # 2) проставляем корректные состояния для старых записей
     #    (если колонка только что добавлена или была с default=0)
-    cur.execute("""
-        UPDATE matches
-        SET state = CASE
-            WHEN winner_id IS NOT NULL        THEN 3  -- FINISHED
-            WHEN p2_id IS NULL                THEN 0  -- WAITING_OPPONENT
-            WHEN p1_paid=1 AND p2_paid=1      THEN 2  -- ACTIVE
-            ELSE 1                                  -- WAITING_PAYMENT
-        END
-        WHERE state IS NULL OR state=0
-    """)
+        cur.execute("""
+            UPDATE matches
+            SET state = CASE
+                WHEN winner_id IS NOT NULL        THEN 3  -- FINISHED
+                WHEN p2_id IS NULL                THEN 0  -- WAITING_OPPONENT
+                WHEN p1_paid=1 AND p2_paid=1      THEN 2  -- ACTIVE
+                ELSE 1                                  -- WAITING_PAYMENT
+            END
+            WHERE state IS NULL OR state=0
+        """)
 
-    self.conn.commit()
+        self.conn.commit()
 
 
     # ---------- helpers ----------
