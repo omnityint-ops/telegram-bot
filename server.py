@@ -1,14 +1,10 @@
 # server.py
-import os
-import traceback
+import os, traceback
 from fastapi import FastAPI, Request, HTTPException
 from aiogram.types import Update
-
-# ВАЖНО: модуль, из которого импортируем bot/dp, не должен запускать polling при импорте!
-from main import dp, bot  # только инициализация, без executor/polling
+from main import dp, bot  # важно: в main.py polling запускается ТОЛЬКО под if __name__ == "__main__"
 
 app = FastAPI()
-
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 
 @app.get("/")
@@ -26,13 +22,11 @@ async def me():
 
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
-    # 1) проверка секрета
-    if WEBHOOK_SECRET:
-        if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
-            raise HTTPException(status_code=401, detail="Invalid secret")
+    if WEBHOOK_SECRET and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != WEBHOOK_SECRET:
+        raise HTTPException(status_code=401, detail="Invalid secret")
 
-    # 2) читаем тело и логируем безопасно
     data = await request.json()
+    # лёгкий лог входа
     try:
         chat_id = data.get("message", {}).get("chat", {}).get("id")
         text = data.get("message", {}).get("text")
@@ -40,12 +34,11 @@ async def telegram_webhook(request: Request):
     except Exception:
         pass
 
-    # 3) «мягкий» парсинг и обработка, чтобы не отдавать 500
+    # НЕ роняем 500 ни при парсинге, ни при обработке
     try:
-        update = Update.model_validate(data)  # aiogram v3
+        update = Update.model_validate(data)  # aiogram v3 + pydantic v2
         await dp.feed_update(bot, update)
     except Exception:
         traceback.print_exc()
 
-    # Всегда 200, чтобы Telegram не ретраил
     return {"ok": True}
