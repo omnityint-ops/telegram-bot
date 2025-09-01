@@ -1,9 +1,11 @@
 import os
 import time
-import sqlite3
 import asyncio
 from dataclasses import dataclass
 from typing import Optional, Dict, Tuple
+
+import psycopg
+from psycopg.rows import dict_row
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
@@ -18,6 +20,8 @@ from dotenv import load_dotenv
 # ==================== ENV ====================
 load_dotenv()
 BOT_TOKEN = os.environ["BOT_TOKEN"]
+DATABASE_URL = os.environ["DATABASE_URL"]
+
 
 # несколько админов
 raw_admins = os.getenv("ADMIN_IDS") or os.getenv("ADMIN_ID", "")
@@ -45,170 +49,163 @@ def refund_each_after_fee(stake: int) -> int:
     return int(round(stake * (1 - FEE_PCT / 100)))
 
 # ==================== DB LAYER ====================
+# ==================== DB LAYER (Postgres) ====================
 class DB:
-    def __init__(self, path: str):
-        self.conn = sqlite3.connect(path, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
+    def __init__(self, dsn: str):
+        # единое подключение; курсоры словарные
+        self.conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=True)
         self.init()
 
     def init(self):
-        cur = self.conn.cursor()
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            balance INTEGER NOT NULL DEFAULT 0
-        );
-        """)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS queue (
-            user_id INTEGER PRIMARY KEY,
-            stake   INTEGER NOT NULL
-        );
-        """)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS matches (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            p1_id INTEGER NOT NULL,
-            p2_id INTEGER,
-            stake INTEGER NOT NULL DEFAULT 10,
-            p1_paid INTEGER NOT NULL DEFAULT 0,
-            p2_paid INTEGER NOT NULL DEFAULT 0,
-            p1_paid_src TEXT,
-            p2_paid_src TEXT,
-            p1_balance_debited INTEGER NOT NULL DEFAULT 0,
-            p2_balance_debited INTEGER NOT NULL DEFAULT 0,
-            active INTEGER NOT NULL DEFAULT 0,
-            winner_id INTEGER
-        );
-        """)
-        # миграции на старых БД
-        def ensure_col(table, col, ddl):
-            cur.execute(f"PRAGMA table_info({table})")
-            cols = [r[1] for r in cur.fetchall()]
-            if col not in cols:
-                cur.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
-        ensure_col("queue", "stake", "INTEGER NOT NULL DEFAULT 10")
-        ensure_col("matches", "stake", "INTEGER NOT NULL DEFAULT 10")
-        ensure_col("matches", "p1_paid_src", "TEXT")
-        ensure_col("matches", "p2_paid_src", "TEXT")
-        ensure_col("matches", "p1_balance_debited", "INTEGER NOT NULL DEFAULT 0")
-        ensure_col("matches", "p2_balance_debited", "INTEGER NOT NULL DEFAULT 0")
-        self.conn.commit()
+        with self.conn.cursor() as cur:
+            # users
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                balance INTEGER NOT NULL DEFAULT 0
+            );
+            """)
+            # queue
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS queue (
+                user_id BIGINT PRIMARY KEY,
+                stake   INTEGER NOT NULL
+            );
+            """)
+            # matches
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS matches (
+                id BIGSERIAL PRIMARY KEY,
+                p1_id BIGINT NOT NULL,
+                p2_id BIGINT,
+                stake INTEGER NOT NULL DEFAULT 10,
+                p1_paid BOOLEAN NOT NULL DEFAULT FALSE,
+                p2_paid BOOLEAN NOT NULL DEFAULT FALSE,
+                p1_paid_src TEXT,
+                p2_paid_src TEXT,
+                p1_balance_debited INTEGER NOT NULL DEFAULT 0,
+                p2_balance_debited INTEGER NOT NULL DEFAULT 0,
+                active BOOLEAN NOT NULL DEFAULT FALSE,
+                winner_id BIGINT
+            );
+            """)
 
     # ---- Users / Balance ----
     def get_balance(self, user_id: int) -> int:
-        cur = self.conn.cursor()
-        cur.execute("SELECT balance FROM users WHERE user_id=?", (user_id,))
-        row = cur.fetchone()
-        return row["balance"] if row else 0
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT balance FROM users WHERE user_id=%s", (user_id,))
+            row = cur.fetchone()
+            return int(row["balance"]) if row else 0
 
     def add_balance(self, user_id: int, delta: int):
-        cur = self.conn.cursor()
-        cur.execute("INSERT INTO users(user_id, balance) VALUES(?, 0) ON CONFLICT(user_id) DO NOTHING", (user_id,))
-        cur.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (delta, user_id))
-        self.conn.commit()
+        with self.conn.cursor() as cur:
+            # upsert
+            cur.execute("""
+                INSERT INTO users(user_id, balance) VALUES(%s, %s)
+                ON CONFLICT (user_id) DO UPDATE SET balance = users.balance + EXCLUDED.balance
+            """, (user_id, delta))
 
     # ---- Queue ----
     def in_queue(self, user_id: int) -> bool:
-        cur = self.conn.cursor()
-        cur.execute("SELECT 1 FROM queue WHERE user_id=?", (user_id,))
-        return cur.fetchone() is not None
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM queue WHERE user_id=%s", (user_id,))
+            return cur.fetchone() is not None
 
     def add_to_queue(self, user_id: int, stake: int):
-        cur = self.conn.cursor()
-        cur.execute("INSERT OR REPLACE INTO queue(user_id, stake) VALUES(?,?)", (user_id, stake))
-        self.conn.commit()
+        with self.conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO queue(user_id, stake) VALUES(%s,%s)
+                ON CONFLICT (user_id) DO UPDATE SET stake=EXCLUDED.stake
+            """, (user_id, stake))
 
     def pop_any_from_queue(self, exclude_user_id: Optional[int], stake: int) -> Optional[int]:
-        cur = self.conn.cursor()
-        if exclude_user_id:
-            cur.execute("SELECT user_id FROM queue WHERE user_id != ? AND stake=? LIMIT 1",
-                        (exclude_user_id, stake))
-        else:
-            cur.execute("SELECT user_id FROM queue WHERE stake=? LIMIT 1", (stake,))
-        row = cur.fetchone()
-        if not row:
-            return None
-        opp = row["user_id"]
-        cur.execute("DELETE FROM queue WHERE user_id=?", (opp,))
-        self.conn.commit()
-        return opp
+        with self.conn.cursor() as cur:
+            if exclude_user_id:
+                cur.execute("SELECT user_id FROM queue WHERE user_id <> %s AND stake=%s LIMIT 1",
+                            (exclude_user_id, stake))
+            else:
+                cur.execute("SELECT user_id FROM queue WHERE stake=%s LIMIT 1", (stake,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            opp = int(row["user_id"])
+            cur.execute("DELETE FROM queue WHERE user_id=%s", (opp,))
+            return opp
 
     def remove_from_queue(self, user_id: int):
-        cur = self.conn.cursor()
-        cur.execute("DELETE FROM queue WHERE user_id=?", (user_id,))
-        self.conn.commit()
+        with self.conn.cursor() as cur:
+            cur.execute("DELETE FROM queue WHERE user_id=%s", (user_id,))
 
     # ---- Matches ----
     def create_match(self, p1_id: int, p2_id: int, stake: int) -> int:
-        cur = self.conn.cursor()
-        cur.execute("""INSERT INTO matches(p1_id, p2_id, stake) VALUES(?,?,?)""", (p1_id, p2_id, stake))
-        self.conn.commit()
-        return cur.lastrowid
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO matches(p1_id, p2_id, stake) VALUES(%s,%s,%s) RETURNING id",
+                (p1_id, p2_id, stake)
+            )
+            return int(cur.fetchone()["id"])
 
-    def get_match_by_user(self, user_id: int) -> Optional[sqlite3.Row]:
-        cur = self.conn.cursor()
-        cur.execute("""
-            SELECT * FROM matches
-            WHERE (p1_id=? OR p2_id=?) AND (winner_id IS NULL)
-            ORDER BY id DESC LIMIT 1
-        """, (user_id, user_id))
-        return cur.fetchone()
+    def get_match_by_user(self, user_id: int) -> Optional[dict]:
+        with self.conn.cursor() as cur:
+            cur.execute("""
+                SELECT * FROM matches
+                WHERE (p1_id=%s OR p2_id=%s) AND (winner_id IS NULL)
+                ORDER BY id DESC LIMIT 1
+            """, (user_id, user_id))
+            return cur.fetchone()
 
     def mark_paid_invoice(self, match_id: int, user_id: int):
-        # Больше не используется для матчей (оставлено для обратной совместимости)
-        cur = self.conn.cursor()
-        cur.execute("SELECT p1_id, p2_id FROM matches WHERE id=?", (match_id,))
-        row = cur.fetchone()
-        if not row:
-            return
-        if user_id == row["p1_id"]:
-            cur.execute("UPDATE matches SET p1_paid=1, p1_paid_src='invoice' WHERE id=?", (match_id,))
-        elif user_id == row["p2_id"]:
-            cur.execute("UPDATE matches SET p2_paid=1, p2_paid_src='invoice' WHERE id=?", (match_id,))
-        self.conn.commit()
+        # на будущее — совместимость
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT p1_id, p2_id FROM matches WHERE id=%s", (match_id,))
+            row = cur.fetchone()
+            if not row:
+                return
+            if user_id == row["p1_id"]:
+                cur.execute("UPDATE matches SET p1_paid=TRUE, p1_paid_src='invoice' WHERE id=%s", (match_id,))
+            elif user_id == row["p2_id"]:
+                cur.execute("UPDATE matches SET p2_paid=TRUE, p2_paid_src='invoice' WHERE id=%s", (match_id,))
 
     def mark_paid_balance(self, match_id: int, user_slot: int, amount: int):
         col_paid = "p1_paid" if user_slot == 1 else "p2_paid"
-        col_src = "p1_paid_src" if user_slot == 1 else "p2_paid_src"
-        col_deb = "p1_balance_debited" if user_slot == 1 else "p2_balance_debited"
-        cur = self.conn.cursor()
-        cur.execute(f"UPDATE matches SET {col_paid}=1, {col_src}='balance', {col_deb}=? WHERE id=?", (amount, match_id))
-        self.conn.commit()
+        col_src  = "p1_paid_src" if user_slot == 1 else "p2_paid_src"
+        col_deb  = "p1_balance_debited" if user_slot == 1 else "p2_balance_debited"
+        with self.conn.cursor() as cur:
+            cur.execute(f"UPDATE matches SET {col_paid}=TRUE, {col_src}='balance', {col_deb}=%s WHERE id=%s",
+                        (amount, match_id,))
 
     def get_flags(self, match_id: int) -> Tuple[bool, bool, bool]:
-        cur = self.conn.cursor()
-        cur.execute("SELECT p1_paid, p2_paid, active FROM matches WHERE id=?", (match_id,))
-        row = cur.fetchone()
-        return (bool(row["p1_paid"]), bool(row["p2_paid"]), bool(row["active"])) if row else (False, False, False)
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT p1_paid, p2_paid, active FROM matches WHERE id=%s", (match_id,))
+            row = cur.fetchone()
+            return (bool(row["p1_paid"]), bool(row["p2_paid"]), bool(row["active"])) if row else (False, False, False)
 
     def can_start(self, match_id: int) -> bool:
         p1, p2, active = self.get_flags(match_id)
         return p1 and p2 and not active
 
     def start_match(self, match_id: int):
-        cur = self.conn.cursor()
-        cur.execute("UPDATE matches SET active=1 WHERE id=?", (match_id,))
-        self.conn.commit()
+        with self.conn.cursor() as cur:
+            cur.execute("UPDATE matches SET active=TRUE WHERE id=%s", (match_id,))
 
     def set_winner_and_close(self, match_id: int, winner_id: int):
-        cur = self.conn.cursor()
-        cur.execute("UPDATE matches SET winner_id=?, active=0 WHERE id=?", (winner_id, match_id))
-        self.conn.commit()
+        with self.conn.cursor() as cur:
+            cur.execute("UPDATE matches SET winner_id=%s, active=FALSE WHERE id=%s", (winner_id, match_id))
 
     def get_paid_sources(self, match_id: int) -> Tuple[Optional[str], Optional[str], int]:
-        cur = self.conn.cursor()
-        cur.execute("SELECT p1_paid_src, p2_paid_src, stake FROM matches WHERE id=?", (match_id,))
-        row = cur.fetchone()
-        if not row:
-            return None, None, 0
-        return row["p1_paid_src"], row["p2_paid_src"], int(row["stake"])
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT p1_paid_src, p2_paid_src, stake FROM matches WHERE id=%s", (match_id,))
+            row = cur.fetchone()
+            if not row:
+                return None, None, 0
+            return row["p1_paid_src"], row["p2_paid_src"], int(row["stake"])
 
     def get_match_players(self, match_id: int) -> Tuple[int, Optional[int]]:
-        cur = self.conn.cursor()
-        cur.execute("SELECT p1_id, p2_id FROM matches WHERE id=?", (match_id,))
-        row = cur.fetchone()
-        return row["p1_id"], row["p2_id"]
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT p1_id, p2_id FROM matches WHERE id=%s", (match_id,))
+            row = cur.fetchone()
+            return int(row["p1_id"]), (int(row["p2_id"]) if row["p2_id"] is not None else None)
+
 
 # ==================== MODELS / HELPERS ====================
 @dataclass
