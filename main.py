@@ -755,6 +755,31 @@ async def on_draw_lemon(mv: MatchView):
     except Exception:
         pass
 
+
+@router.message(Command("addstars"))
+async def cmd_addstars(m: Message):
+    if not is_admin(m.from_user.id):
+        return await m.answer("⛔ Нет доступа")
+
+    parts = m.text.split()
+    if len(parts) != 3:
+        return await m.answer("Формат: /addstars <user_id> <amount>")
+
+    try:
+        uid = int(parts[1])
+        amt = int(parts[2])
+    except ValueError:
+        return await m.answer("user_id и amount должны быть числами")
+
+    db.add_balance(uid, amt)
+    new_bal = db.get_balance(uid)
+    await m.answer(f"✅ Игрок {svc.link_user(uid)} получил {amt} ⭐.\nНовый баланс: {new_bal} ⭐")
+    try:
+        await bot.send_message(uid, f"💎 Тебе начислено {amt} ⭐.\nТекущий баланс: {new_bal} ⭐")
+    except Exception:
+        pass
+
+
 # ==================== ADMIN ====================
 @dp.message(Command("allbalances"))
 async def cmd_allbalances(m: Message):
