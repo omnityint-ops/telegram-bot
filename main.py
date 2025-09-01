@@ -753,7 +753,7 @@ async def on_draw_lemon(mv: MatchView):
         pass
 
 
-@dp.message(Command("addstars")))
+@dp.message(Command("addstars"))
 async def cmd_addstars(m: Message):
     if not is_admin(m.from_user.id):
         return await m.answer("⛔ Нет доступа")
