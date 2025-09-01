@@ -2,7 +2,7 @@ import os
 import time
 import asyncio
 from dataclasses import dataclass
-from typing import Optional, Dict, Tuple
+from typing import Optional, Dict, Tuple, Mapping, Any  # добавь Mapping, Any
 
 import psycopg
 from psycopg.rows import dict_row
@@ -34,7 +34,6 @@ def is_admin(uid: int) -> bool:
 
 # ==================== CONSTANTS ====================
 FEE_PCT = 10
-DB_PATH = "game.db"
 COOLDOWN_SEC = 5
 ALLOWED_STAKES = [10, 25, 50, 100, 250, 500, 1000]
 TOPUP_AMOUNTS = [10, 25, 50, 100, 250, 500, 1000]
@@ -221,12 +220,13 @@ class MatchView:
     active: bool
     winner_id: Optional[int]
 
-def row_to_match(row: sqlite3.Row) -> Optional[MatchView]:
+def row_to_match(row: Optional[Mapping[str, Any]]) -> Optional['MatchView']:
     if not row:
         return None
     return MatchView(
         id=row["id"], p1_id=row["p1_id"], p2_id=row["p2_id"],
-        stake=int(row["stake"]), p1_paid=bool(row["p1_paid"]), p2_paid=bool(row["p2_paid"]),
+        stake=int(row["stake"]),
+        p1_paid=bool(row["p1_paid"]), p2_paid=bool(row["p2_paid"]),
         p1_paid_src=row["p1_paid_src"], p2_paid_src=row["p2_paid_src"],
         active=bool(row["active"]), winner_id=row["winner_id"],
     )
@@ -279,7 +279,7 @@ def is_forwarded(msg: Message) -> bool:
     return bool(getattr(msg, "forward_date", None) or getattr(msg, "forward_origin", None))
 
 # ==================== GLOBALS ====================
-db = DB(DB_PATH)
+db = DB(DATABASE_URL)
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 payments_router = Router()
@@ -753,20 +753,17 @@ async def on_draw_lemon(mv: MatchView):
         pass
 
 
-@dp.message(Command("addstars"))
+@dp.message(Command("addstars")))
 async def cmd_addstars(m: Message):
     if not is_admin(m.from_user.id):
         return await m.answer("⛔ Нет доступа")
-
     parts = m.text.split()
     if len(parts) != 3:
         return await m.answer("Формат: /addstars <user_id> <amount>")
-
     try:
         uid = int(parts[1]); amt = int(parts[2])
     except ValueError:
         return await m.answer("user_id и amount должны быть числами")
-
     db.add_balance(uid, amt)
     new_bal = db.get_balance(uid)
     await m.answer(f"✅ Игрок {link_user(uid)} получил {amt} ⭐.\nНовый баланс: {new_bal} ⭐", parse_mode="HTML")
@@ -777,20 +774,22 @@ async def cmd_addstars(m: Message):
 
 
 
+
 # ==================== ADMIN ====================
 @dp.message(Command("allbalances"))
 async def cmd_allbalances(m: Message):
     if not is_admin(m.from_user.id):
         return await m.answer("⛔ Доступ запрещён.")
-    cur = db.conn.cursor()
-    cur.execute("SELECT user_id, balance FROM users ORDER BY balance DESC")
-    rows = cur.fetchall()
+    with db.conn.cursor() as cur:
+        cur.execute("SELECT user_id, balance FROM users ORDER BY balance DESC")
+        rows = cur.fetchall()
     if not rows:
         return await m.answer("Балансов пока нет.")
-    text = "📊 *Баланс всех игроков:*\n\n"
+    lines = ["📊 <b>Баланс всех игроков:</b>", ""]
     for r in rows:
-        text += f"👤 {link_user(r['user_id'])} — {r['balance']} ⭐️\n"
-    await m.answer(text, parse_mode="HTML")
+        lines.append(f"👤 {link_user(r['user_id'])} — {r['balance']} ⭐️")
+    await m.answer("\n".join(lines), parse_mode="HTML")
+
 
 @dp.message(Command("whoami"))
 async def cmd_whoami(m: Message):
