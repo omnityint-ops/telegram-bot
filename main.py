@@ -466,19 +466,11 @@ async def cmd_start(m: Message):
     mv = row_to_match(db.get_match_by_user(m.from_user.id))
     kb = inline_menu(db.in_queue(m.from_user.id), bool(mv and not mv.winner_id))
     text = (
-        "PVP-Арена 1v1!
-
-"
-        "Режимы:
-"
-        "• 🎰 Слоты — первый, кто выбьет 777, побеждает. BAR-BAR-BAR — проигрыш бросившего.
-"
-        "• 🎲 Кости — каждый кидает по 3 раза, у кого сумма больше — тот выиграл.
-
-"
-        f"Комиссия — {FEE_PCT}%. Пополнение: /topup. Вывод: /withdraw.
-
-"
+        "PVP-Арена 1v1!\n\n"
+        "Режимы:\n"
+        "• 🎰 Слоты — первый, кто выбьет 777, побеждает. BAR-BAR-BAR — проигрыш бросившего.\n"
+        "• 🎲 Кости — каждый кидает по 3 раза, у кого сумма больше — тот выиграл.\n\n"
+        f"Комиссия — {FEE_PCT}%. Пополнение: /topup. Вывод: /withdraw.\n\n"
         "Жми «🎰 Слоты» или «🎲 Кости», потом выбери ставку."
     )
     await m.answer(text, reply_markup=kb, disable_web_page_preview=True)
@@ -1046,14 +1038,12 @@ async def cmd_allbalances(m: Message):
     lines = ["📊 <b>Баланс всех игроков:</b>", ""]
     for r in rows:
         lines.append(f"👤 {link_user(r['user_id'])} — {r['balance']} ⭐️")
-    await m.answer("
-".join(lines), parse_mode="HTML")
+    await m.answer("\n".join(lines), parse_mode="HTML")
 
 
 @dp.message(Command("whoami"))
 async def cmd_whoami(m: Message):
-    await m.answer(f"Твой user_id: {m.from_user.id}
-Админы: {sorted(ADMIN_IDS)}")
+    await m.answer(f"Твой user_id: {m.from_user.id}\nАдмины: {sorted(ADMIN_IDS)}")
 
 
 @dp.message(Command("envcheck"))
@@ -1068,3 +1058,4 @@ if __name__ == "__main__":
     async def main():
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     asyncio.run(main())
+
