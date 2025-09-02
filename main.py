@@ -266,7 +266,7 @@ class DB:
             row = cur.fetchone()
             return int(row["p1_id"]), (int(row["p2_id"]) if row["p2_id"] is not None else None)
 
-    # ------- Dice3 helpers -------
+       # ------- Dice3 helpers -------
     def get_dice_state(self, match_id: int) -> Optional[dict]:
         with self.conn.cursor() as cur:
             cur.execute("""
@@ -276,23 +276,24 @@ class DB:
             return cur.fetchone()
 
     def add_dice_throw(self, match_id: int, slot: int, value: int) -> bool:
-    """
-    Добавляет бросок ТОЛЬКО если у игрока ещё < 3 бросков.
-    Возвращает True, если апдейт произошёл (бросок засчитан), иначе False.
-    """
-    sum_col = "p1_dice_sum" if slot == 1 else "p2_dice_sum"
-    cnt_col = "p1_dice_cnt" if slot == 1 else "p2_dice_cnt"
-    with self.conn.cursor() as cur:
-        cur.execute(
-            f"""
-            UPDATE matches
-               SET {sum_col} = {sum_col} + %s,
-                   {cnt_col} = {cnt_col} + 1
-             WHERE id = %s AND {cnt_col} < 3
-            """,
-            (value, match_id),
-        )
-        return cur.rowcount > 0
+        """
+        Добавляет бросок ТОЛЬКО если у игрока ещё < 3 бросков.
+        Возвращает True, если апдейт произошёл (бросок засчитан), иначе False.
+        """
+        sum_col = "p1_dice_sum" if slot == 1 else "p2_dice_sum"
+        cnt_col = "p1_dice_cnt" if slot == 1 else "p2_dice_cnt"
+        with self.conn.cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE matches
+                   SET {sum_col} = {sum_col} + %s,
+                       {cnt_col} = {cnt_col} + 1
+                 WHERE id = %s AND {cnt_col} < 3
+                """,
+                (value, match_id),
+            )
+            return cur.rowcount > 0
+
 
 # ==================== MODELS / HELPERS ====================
 @dataclass
