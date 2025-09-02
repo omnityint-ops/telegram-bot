@@ -39,15 +39,17 @@ ALLOWED_STAKES = [10, 25, 50, 100, 250, 500, 1000]
 TOPUP_AMOUNTS = [10, 25, 50, 100, 250, 500, 1000]
 MIN_WITHDRAW = 400
 
+
 def prize_after_fee(stake: int) -> int:
     # победитель получает 2*stake за вычетом комиссии
     return int(round((stake * 2) * (1 - FEE_PCT / 100)))
+
 
 def refund_each_after_fee(stake: int) -> int:
     # ничья: каждому возвращаем stake минус комиссия
     return int(round(stake * (1 - FEE_PCT / 100)))
 
-# ==================== DB LAYER ====================
+
 # ==================== DB LAYER (Postgres) ====================
 class DB:
     def __init__(self, dsn: str):
@@ -99,10 +101,13 @@ class DB:
     def add_balance(self, user_id: int, delta: int):
         with self.conn.cursor() as cur:
             # upsert
-            cur.execute("""
+            cur.execute(
+                """
                 INSERT INTO users(user_id, balance) VALUES(%s, %s)
                 ON CONFLICT (user_id) DO UPDATE SET balance = users.balance + EXCLUDED.balance
-            """, (user_id, delta))
+                """,
+                (user_id, delta),
+            )
 
     # ---- Queue ----
     def in_queue(self, user_id: int) -> bool:
@@ -112,16 +117,21 @@ class DB:
 
     def add_to_queue(self, user_id: int, stake: int):
         with self.conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 INSERT INTO queue(user_id, stake) VALUES(%s,%s)
                 ON CONFLICT (user_id) DO UPDATE SET stake=EXCLUDED.stake
-            """, (user_id, stake))
+                """,
+                (user_id, stake),
+            )
 
     def pop_any_from_queue(self, exclude_user_id: Optional[int], stake: int) -> Optional[int]:
         with self.conn.cursor() as cur:
             if exclude_user_id:
-                cur.execute("SELECT user_id FROM queue WHERE user_id <> %s AND stake=%s LIMIT 1",
-                            (exclude_user_id, stake))
+                cur.execute(
+                    "SELECT user_id FROM queue WHERE user_id <> %s AND stake=%s LIMIT 1",
+                    (exclude_user_id, stake),
+                )
             else:
                 cur.execute("SELECT user_id FROM queue WHERE stake=%s LIMIT 1", (stake,))
             row = cur.fetchone()
@@ -140,44 +150,79 @@ class DB:
         with self.conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO matches(p1_id, p2_id, stake) VALUES(%s,%s,%s) RETURNING id",
-                (p1_id, p2_id, stake)
+                (p1_id, p2_id, stake),
             )
             return int(cur.fetchone()["id"])
 
     def get_match_by_user(self, user_id: int) -> Optional[dict]:
         with self.conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 SELECT * FROM matches
                 WHERE (p1_id=%s OR p2_id=%s) AND (winner_id IS NULL)
                 ORDER BY id DESC LIMIT 1
-            """, (user_id, user_id))
+                """,
+                (user_id, user_id),
+            )
             return cur.fetchone()
 
     def mark_paid_invoice(self, match_id: int, user_id: int):
-        # на будущее — совместимость
+        # отмечаем как оплачено инвойсом
         with self.conn.cursor() as cur:
             cur.execute("SELECT p1_id, p2_id FROM matches WHERE id=%s", (match_id,))
             row = cur.fetchone()
             if not row:
                 return
             if user_id == row["p1_id"]:
-                cur.execute("UPDATE matches SET p1_paid=TRUE, p1_paid_src='invoice' WHERE id=%s", (match_id,))
+                cur.execute(
+                    "UPDATE matches SET p1_paid=TRUE, p1_paid_src='invoice' WHERE id=%s",
+                    (match_id,),
+                )
             elif user_id == row["p2_id"]:
-                cur.execute("UPDATE matches SET p2_paid=TRUE, p2_paid_src='invoice' WHERE id=%s", (match_id,))
+                cur.execute(
+                    "UPDATE matches SET p2_paid=TRUE, p2_paid_src='invoice' WHERE id=%s",
+                    (match_id,),
+                )
 
     def mark_paid_balance(self, match_id: int, user_slot: int, amount: int):
         col_paid = "p1_paid" if user_slot == 1 else "p2_paid"
-        col_src  = "p1_paid_src" if user_slot == 1 else "p2_paid_src"
-        col_deb  = "p1_balance_debited" if user_slot == 1 else "p2_balance_debited"
+        col_src = "p1_paid_src" if user_slot == 1 else "p2_paid_src"
+        col_deb = "p1_balance_debited" if user_slot == 1 else "p2_balance_debited"
         with self.conn.cursor() as cur:
-            cur.execute(f"UPDATE matches SET {col_paid}=TRUE, {col_src}='balance', {col_deb}=%s WHERE id=%s",
-                        (amount, match_id,))
+            cur.execute(
+                f"UPDATE matches SET {col_paid}=TRUE, {col_src}='balance', {col_deb}=%s WHERE id=%s",
+                (amount, match_id,),
+            )
+
+    def add_partial_debit(self, match_id: int, user_slot: int, amount: int):
+        col_deb = "p1_balance_debited" if user_slot == 1 else "p2_balance_debited"
+        with self.conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE matches SET {col_deb} = {col_deb} + %s WHERE id=%s",
+                (amount, match_id,),
+            )
+
+    def get_match_payment_state(self, match_id: int) -> Optional[dict]:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT stake, p1_paid, p2_paid, p1_balance_debited, p2_balance_debited
+                FROM matches WHERE id=%s
+                """,
+                (match_id,),
+            )
+            row = cur.fetchone()
+            return row if row else None
 
     def get_flags(self, match_id: int) -> Tuple[bool, bool, bool]:
         with self.conn.cursor() as cur:
             cur.execute("SELECT p1_paid, p2_paid, active FROM matches WHERE id=%s", (match_id,))
             row = cur.fetchone()
-            return (bool(row["p1_paid"]), bool(row["p2_paid"]), bool(row["active"])) if row else (False, False, False)
+            return (
+                bool(row["p1_paid"]),
+                bool(row["p2_paid"]),
+                bool(row["active"]),
+            ) if row else (False, False, False)
 
     def can_start(self, match_id: int) -> bool:
         p1, p2, active = self.get_flags(match_id)
@@ -189,11 +234,17 @@ class DB:
 
     def set_winner_and_close(self, match_id: int, winner_id: int):
         with self.conn.cursor() as cur:
-            cur.execute("UPDATE matches SET winner_id=%s, active=FALSE WHERE id=%s", (winner_id, match_id))
+            cur.execute(
+                "UPDATE matches SET winner_id=%s, active=FALSE WHERE id=%s",
+                (winner_id, match_id),
+            )
 
     def get_paid_sources(self, match_id: int) -> Tuple[Optional[str], Optional[str], int]:
         with self.conn.cursor() as cur:
-            cur.execute("SELECT p1_paid_src, p2_paid_src, stake FROM matches WHERE id=%s", (match_id,))
+            cur.execute(
+                "SELECT p1_paid_src, p2_paid_src, stake FROM matches WHERE id=%s",
+                (match_id,),
+            )
             row = cur.fetchone()
             if not row:
                 return None, None, 0
@@ -220,19 +271,27 @@ class MatchView:
     active: bool
     winner_id: Optional[int]
 
+
 def row_to_match(row: Optional[Mapping[str, Any]]) -> Optional['MatchView']:
     if not row:
         return None
     return MatchView(
-        id=row["id"], p1_id=row["p1_id"], p2_id=row["p2_id"],
+        id=row["id"],
+        p1_id=row["p1_id"],
+        p2_id=row["p2_id"],
         stake=int(row["stake"]),
-        p1_paid=bool(row["p1_paid"]), p2_paid=bool(row["p2_paid"]),
-        p1_paid_src=row["p1_paid_src"], p2_paid_src=row["p2_paid_src"],
-        active=bool(row["active"]), winner_id=row["winner_id"],
+        p1_paid=bool(row["p1_paid"]),
+        p2_paid=bool(row["p2_paid"]),
+        p1_paid_src=row["p1_paid_src"],
+        p2_paid_src=row["p2_paid_src"],
+        active=bool(row["active"]),
+        winner_id=row["winner_id"],
     )
+
 
 def link_user(user_id: int) -> str:
     return f"<a href='tg://user?id={user_id}'>игрок</a>"
+
 
 def inline_menu(in_queue: bool, in_match: bool) -> InlineKeyboardMarkup:
     buttons = []
@@ -247,6 +306,7 @@ def inline_menu(in_queue: bool, in_match: bool) -> InlineKeyboardMarkup:
     buttons.append([InlineKeyboardButton(text="💳 Пополнить баланс", callback_data="topup_open")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+
 def stake_keyboard() -> InlineKeyboardMarkup:
     rows = [
         [("10⭐", "stake_10"), ("25⭐", "stake_25"), ("50⭐", "stake_50")],
@@ -256,6 +316,7 @@ def stake_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text=t, callback_data=cb) for t, cb in row] for row in rows]
     )
+
 
 def topup_keyboard() -> InlineKeyboardMarkup:
     rows = [
@@ -267,16 +328,19 @@ def topup_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[[InlineKeyboardButton(text=t, callback_data=cb) for t, cb in row] for row in rows]
     )
 
+
 spin_kb = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton(text="/spin")]],
     resize_keyboard=True,
     one_time_keyboard=False,
-    input_field_placeholder="Жми /spin или отправь 🎰"
+    input_field_placeholder="Жми /spin или отправь 🎰",
 )
+
 
 def is_forwarded(msg: Message) -> bool:
     # если сообщение переслано — у него есть forward_date / forward_origin
     return bool(getattr(msg, "forward_date", None) or getattr(msg, "forward_origin", None))
+
 
 # ==================== GLOBALS ====================
 db = DB(DATABASE_URL)
@@ -319,58 +383,91 @@ async def show_cooldown(chat_id: int, user_id: int, seconds: int = COOLDOWN_SEC)
 
     cooldown_tasks[user_id] = asyncio.create_task(_runner())
 
+
 def cooldown_ready(user_id: int) -> bool:
     now = time.time()
     return (now - last_spin_time.get(user_id, 0)) >= COOLDOWN_SEC
 
+
 def mark_cooldown(user_id: int):
     last_spin_time[user_id] = time.time()
+
 
 # ==================== SLOT DECODER (правильный) ====================
 # Telegram slot value: 1..64, где value-1 раскладывается в base-4
 # 0=bar, 1=grapes, 2=lemon, 3=seven
 SYMBOLS = ("bar", "grapes", "lemon", "seven")
 
+
 def combo_parts(value: int) -> Tuple[str, str, str]:
     v = value - 1
-    left   = SYMBOLS[(v // 1)  % 4]
-    center = SYMBOLS[(v // 4)  % 4]
-    right  = SYMBOLS[(v // 16) % 4]
+    left = SYMBOLS[(v // 1) % 4]
+    center = SYMBOLS[(v // 4) % 4]
+    right = SYMBOLS[(v // 16) % 4]
     return (left, center, right)
+
 
 def is_triple_bar(value: int) -> bool:
     return value == 1  # bar-bar-bar
 
+
 def is_triple_lemon(value: int) -> bool:
     return value == 43  # lemon-lemon-lemon
+
 
 def is_jackpot_777(value: int) -> bool:
     return value == 64  # seven-seven-seven
 
+
 # ==================== PAY / AUTO-DEBIT ====================
 async def try_auto_pay_and_invoice(match_id: int, uid: int, stake: int):
     """
-    Новая логика: участие только с внутреннего баланса.
-    Если хватает — списываем и помечаем как оплачено.
-    Если не хватает — показываем клавиатуру пополнения /topup.
+    Новая логика:
+      1) Списываем доступное с баланса (частичная предоплата возможна).
+      2) На недостающую часть мгновенно отправляем счёт в Stars.
+      3) Если хватает баланса полностью — сразу помечаем оплату.
     """
     p1_id, p2_id = db.get_match_players(match_id)
     slot = 1 if uid == p1_id else 2
 
+    state = db.get_match_payment_state(match_id)
+    already_debited = int(state["p1_balance_debited"] if slot == 1 else state["p2_balance_debited"]) if state else 0
+    need_total = stake - already_debited
+    if need_total <= 0:
+        db.mark_paid_balance(match_id, slot, stake)
+        await bot.send_message(uid, f"✅ Ставка {stake} ⭐ уже оплачена с баланса.")
+        return
+
     bal = db.get_balance(uid)
-    if bal >= stake:
-        db.add_balance(uid, -stake)
+
+    # 1) используем баланс
+    use_from_balance = min(bal, need_total)
+    if use_from_balance > 0:
+        db.add_balance(uid, -use_from_balance)
+        db.add_partial_debit(match_id, slot, use_from_balance)
+
+    remaining = need_total - use_from_balance
+    if remaining <= 0:
         db.mark_paid_balance(match_id, slot, stake)
         await bot.send_message(uid, f"✅ Ставка {stake} ⭐ списана с твоего баланса.")
-    else:
-        need = stake - bal
-        await bot.send_message(
-            uid,
-            "Недостаточно средств на балансе для участия в матче.\n"
-            f"Нужно: {stake} ⭐, у тебя: {bal} ⭐.\n"
-            "Пополнить можно от 10⭐ через /topup.",
-            reply_markup=topup_keyboard()
-        )
+        return
+
+    # 2) выставляем счёт на недостающую часть
+    title = f"Доплата до ставки (матч #{match_id})"
+    description = f"Автодоплата недостающей части ставки: {remaining} ⭐."
+    prices = [LabeledPrice(label=f"+{remaining}⭐", amount=remaining)]
+    await bot.send_invoice(
+        chat_id=uid,
+        title=title,
+        description=description,
+        payload=f"deficit:{match_id}:{slot}:{remaining}",
+        provider_token="",
+        currency="XTR",
+        prices=prices,
+        request_timeout=45,
+    )
+    await bot.send_message(uid, f"💳 Выставлен счёт на недостающие {remaining} ⭐. После оплаты матч стартует автоматически.")
+
 
 # ==================== COMMANDS ====================
 @dp.message(Command("start"))
@@ -393,10 +490,12 @@ async def cmd_start(m: Message):
     )
     await m.answer(text, reply_markup=kb, disable_web_page_preview=True)
 
+
 @dp.message(Command("balance"))
 async def cmd_balance(m: Message):
     bal = db.get_balance(m.from_user.id)
     await m.answer(f"Твой призовой баланс: {bal} ⭐️")
+
 
 @dp.message(Command("withdraw"))
 async def cmd_withdraw(m: Message):
@@ -412,25 +511,32 @@ async def cmd_withdraw(m: Message):
     )
     await m.answer(text, parse_mode="Markdown")
 
+
 @dp.message(Command("paysupport"))
 async def cmd_support(m: Message):
     await m.answer("Поддержка по платежам: опиши проблему, приложи ID оплаты и скрин. Возможен refund по правилам Stars.")
+
 
 @dp.message(Command("join"))
 async def cmd_join(m: Message):
     await m.answer("Выбери ставку для матча:", reply_markup=stake_keyboard())
 
+
 @dp.message(Command("leave"))
 async def cmd_leave(m: Message):
     await queue_leave_impl(m.from_user.id, m)
+
 
 @dp.message(Command("topup"))
 async def cmd_topup(m: Message):
     await m.answer("Выбери сумму пополнения:", reply_markup=topup_keyboard())
 
+
 # ==================== CALLBACKS: RULES / QUEUE / TOPUP ====================
+
 def stake_from_cb(data: str) -> int:
     return int(data.split("_")[1])
+
 
 @dp.callback_query(F.data == "rules")
 async def cb_rules(cq: CallbackQuery):
@@ -441,19 +547,22 @@ async def cb_rules(cq: CallbackQuery):
         "• Победа — 777; BAR BAR BAR — проигрыш бросившего.\n"
         "• Lemon–Lemon–Lemon — ничья: каждому возврат ставки за вычетом комиссии.\n"
         f"• Кулдаун — {COOLDOWN_SEC} сек.\n"
-        "• Участие — только с внутреннего баланса (пополнение /topup).\n"
+        "• Участие — с внутреннего баланса; если не хватает, недостающее автоматически оплачивается счётом в Stars.\n"
         "• Приз зачисляется на внутренний баланс."
     )
+
 
 @dp.callback_query(F.data == "queue_join")
 async def cb_queue_join(cq: CallbackQuery):
     await cq.answer()
     await cq.message.answer("Выбери ставку для матча:", reply_markup=stake_keyboard())
 
+
 @dp.callback_query(F.data == "queue_leave")
 async def cb_queue_leave(cq: CallbackQuery):
     await cq.answer()
     await queue_leave_impl(cq.from_user.id, cq.message)
+
 
 @dp.callback_query(F.data.startswith("stake_"))
 async def cb_stake(cq: CallbackQuery):
@@ -474,15 +583,15 @@ async def cb_stake(cq: CallbackQuery):
     if opp:
         match_id = db.create_match(p1_id=opp, p2_id=uid, stake=stake)
         await cq.message.answer(
-            f"Найден соперник: {link_user(opp)}.\nПроизведите оплату для начала матча…",
-            parse_mode="HTML"
+            f"Найден соперник: {link_user(opp)}.\nГотовим старт матча…",
+            parse_mode="HTML",
         )
         await bot.send_message(
             opp,
-            f"Подключился соперник: {link_user(uid)}.\nПроизведите оплату для начала матча…",
-            parse_mode="HTML"
+            f"Подключился соперник: {link_user(uid)}.\nГотовим старт матча…",
+            parse_mode="HTML",
         )
-        # Пытаемся списать у обоих; если не хватает — покажем клаву пополнения
+        # Пытаемся списать/автодоплатить у обоих
         for pid in (uid, opp):
             await try_auto_pay_and_invoice(match_id, pid, stake)
 
@@ -505,16 +614,19 @@ async def cb_stake(cq: CallbackQuery):
         db.add_to_queue(uid, stake)
         await cq.message.answer(f"Ты в очереди на матч со ставкой {stake} ⭐. Ждём соперника!")
 
+
 @dp.callback_query(F.data == "topup_open")
 async def cb_topup_open(cq: CallbackQuery):
     await cq.answer()
     await cq.message.answer("Выбери сумму пополнения:", reply_markup=topup_keyboard())
+
 
 def parse_topup_amount(data: str) -> Optional[int]:
     try:
         return int(data.split("_")[1])
     except Exception:
         return None
+
 
 @dp.callback_query(F.data.startswith("topup_"))
 async def cb_topup(cq: CallbackQuery):
@@ -527,10 +639,16 @@ async def cb_topup(cq: CallbackQuery):
     description = f"Пополнение внутреннего баланса на {amt} ⭐."
     prices = [LabeledPrice(label=f"{amt}⭐", amount=amt)]
     await bot.send_invoice(
-        chat_id=uid, title=title, description=description,
+        chat_id=uid,
+        title=title,
+        description=description,
         payload=f"topup:{uid}:{amt}",
-        provider_token="", currency="XTR", prices=prices, request_timeout=45
+        provider_token="",
+        currency="XTR",
+        prices=prices,
+        request_timeout=45,
     )
+
 
 # ==================== QUEUE LEAVE ====================
 async def queue_leave_impl(uid: int, where: Message):
@@ -541,11 +659,16 @@ async def queue_leave_impl(uid: int, where: Message):
         return await where.answer("Ок, убрал из очереди.", reply_markup=kb)
 
     if mv and not mv.active and not mv.winner_id:
-        p1_src, p2_src, stake = db.get_paid_sources(mv.id)
-        if p1_src == 'balance':
-            db.add_balance(mv.p1_id, stake)
-        if p2_src == 'balance' and mv.p2_id:
-            db.add_balance(mv.p2_id, stake)
+        # Возвращаем только то, что реально списали с баланса (частичные предоплаты)
+        state = db.get_match_payment_state(mv.id)
+        p1_deb = int(state["p1_balance_debited"]) if state else 0
+        p2_deb = int(state["p2_balance_debited"]) if (state and mv.p2_id) else 0
+
+        if p1_deb > 0:
+            db.add_balance(mv.p1_id, p1_deb)
+        if mv.p2_id and p2_deb > 0:
+            db.add_balance(mv.p2_id, p2_deb)
+
         db.set_winner_and_close(mv.id, winner_id=0)
         await where.answer("Матч отменён до старта. Средства с баланса возвращены.")
         other = mv.p2_id if uid == mv.p1_id else mv.p1_id
@@ -557,10 +680,12 @@ async def queue_leave_impl(uid: int, where: Message):
         return await where.answer("Матч уже идёт — выход невозможен.")
     await where.answer("Ты не в очереди и не в матче.")
 
+
 # ==================== PAYMENTS (STARS) ====================
 @payments_router.pre_checkout_query()
 async def pre_checkout(q: PreCheckoutQuery):
     await q.answer(ok=True)
+
 
 @payments_router.message(F.successful_payment)
 async def on_success_payment(m: Message):
@@ -605,9 +730,46 @@ async def on_success_payment(m: Message):
                         await bot.send_message(mv.p2_id, text, reply_markup=spin_kb)
         return
 
-    # 2) Старые payload-ы (совместимость). Сейчас мы не используем инвойсы на «доплату» для матчей.
-    # Просто сообщим пользователю.
+    # 2) Доплата дефицита для матча
+    if payload.startswith("deficit:"):
+        try:
+            _, match_id_str, slot_str, amt_str = payload.split(":")
+            match_id = int(match_id_str)
+            slot = int(slot_str)
+            amt = int(amt_str)
+        except Exception:
+            return await m.answer("Оплата получена, но не удалось распознать назначение. Обратись в /paysupport.")
+
+        # Фиксируем сумму как погашенную (для консистентности с частичным дебетом)
+        db.add_partial_debit(match_id, slot, amt)
+        # Отмечаем источник оплаты
+        db.mark_paid_invoice(match_id, m.from_user.id)
+
+        # Если оба оплатили — стартуем матч
+        if db.can_start(match_id):
+            db.start_match(match_id)
+            p1_id, p2_id = db.get_match_players(match_id)
+            # Сбросим КД
+            last_spin_time.pop(p1_id, None)
+            if p2_id:
+                last_spin_time.pop(p2_id, None)
+            # Узнаем ставку
+            state = db.get_match_payment_state(match_id)
+            stake = int(state["stake"]) if state else 0
+            text = (
+                f"Матч начался! Ставка {stake} ⭐ (комиссия {FEE_PCT}%). "
+                f"Приз: {prize_after_fee(stake)} ⭐. /spin или отправляй 🎰."
+            )
+            await bot.send_message(p1_id, text, reply_markup=spin_kb)
+            if p2_id:
+                await bot.send_message(p2_id, text, reply_markup=spin_kb)
+        else:
+            await m.answer("✅ Оплата принята. Ожидаем соперника.")
+        return
+
+    # 3) Старые payload-ы (совместимость)
     await m.answer("Оплата получена. Если это пополнение — пожалуйста, используйте /topup в следующий раз.")
+
 
 # ==================== GAME: /spin ====================
 @dp.message(Command("spin"))
@@ -617,7 +779,7 @@ async def cmd_spin(m: Message):
     if not mv or mv.winner_id:
         return await m.reply("Матч не найден или уже завершён. /join")
     if not mv.active:
-        return await m.reply("Матч ещё не стартовал. Ждём оплату обоих со внутреннего баланса.")
+        return await m.reply("Матч ещё не стартовал. Ждём оплату обоих.")
 
     if not cooldown_ready(uid):
         await show_cooldown(m.chat.id, uid, COOLDOWN_SEC - int(time.time() - last_spin_time.get(uid, 0)))
@@ -649,6 +811,7 @@ async def cmd_spin(m: Message):
             # 🍋🍋🍋 — ничья с удержанием комиссии
             await on_draw_lemon(mv)
 
+
 # ==================== GAME: user-sent 🎰 ====================
 @dp.message(F.dice)
 async def handle_any_dice(m: Message):
@@ -664,7 +827,7 @@ async def handle_any_dice(m: Message):
     if not mv or mv.winner_id:
         return await m.reply("Матч не найден или уже завершён. /join")
     if not mv.active:
-        return await m.reply("Матч ещё не стартовал. Ждём оплату обоих со внутреннего баланса.")
+        return await m.reply("Матч ещё не стартовал. Ждём оплату обоих.")
 
     if not cooldown_ready(uid):
         await show_cooldown(m.chat.id, uid, COOLDOWN_SEC - int(time.time() - last_spin_time.get(uid, 0)))
@@ -680,7 +843,11 @@ async def handle_any_dice(m: Message):
             await bot.forward_message(chat_id=opponent_id, from_chat_id=m.chat.id, message_id=m.message_id)
         except Exception:
             try:
-                await bot.send_message(opponent_id, f"{link_user(uid)} выбил значение: {m.dice.value}", parse_mode="HTML")
+                await bot.send_message(
+                    opponent_id,
+                    f"{link_user(uid)} выбил значение: {m.dice.value}",
+                    parse_mode="HTML",
+                )
             except Exception:
                 pass
 
@@ -692,6 +859,7 @@ async def handle_any_dice(m: Message):
             await on_win(opponent_id, mv)
         elif is_triple_lemon(val):
             await on_draw_lemon(mv)
+
 
 # ==================== WIN / DRAW LOGIC ====================
 async def on_win(winner_id: int, mv: MatchView):
@@ -719,6 +887,7 @@ async def on_win(winner_id: int, mv: MatchView):
     except Exception:
         pass
 
+
 async def on_draw_lemon(mv: MatchView):
     # ничья на 🍋🍋🍋: закрываем матч и возвращаем каждому stake - fee%
     db.set_winner_and_close(mv.id, winner_id=0)
@@ -738,14 +907,16 @@ async def on_draw_lemon(mv: MatchView):
             await bot.send_message(
                 pid,
                 f"Матч завершён ничьёй 🍋🍋🍋.\nВозврат: {refund} ⭐ каждому (комиссия {FEE_PCT}% удержана).",
-                reply_markup=ReplyKeyboardRemove()
+                reply_markup=ReplyKeyboardRemove(),
             )
         except Exception:
             pass
 
     try:
-        txt = (f"🤝 Ничья: 🍋🍋🍋\n"
-               f"Каждый получил обратно по {refund} ⭐ (ставка {mv.stake}⭐, комиссия {FEE_PCT}%).")
+        txt = (
+            f"🤝 Ничья: 🍋🍋🍋\n"
+            f"Каждый получил обратно по {refund} ⭐ (ставка {mv.stake}⭐, комиссия {FEE_PCT}%)."
+        )
         await bot.send_message(mv.p1_id, txt)
         if mv.p2_id:
             await bot.send_message(mv.p2_id, txt)
@@ -761,18 +932,20 @@ async def cmd_addstars(m: Message):
     if len(parts) != 3:
         return await m.answer("Формат: /addstars <user_id> <amount>")
     try:
-        uid = int(parts[1]); amt = int(parts[2])
+        uid = int(parts[1])
+        amt = int(parts[2])
     except ValueError:
         return await m.answer("user_id и amount должны быть числами")
     db.add_balance(uid, amt)
     new_bal = db.get_balance(uid)
-    await m.answer(f"✅ Игрок {link_user(uid)} получил {amt} ⭐.\nНовый баланс: {new_bal} ⭐", parse_mode="HTML")
+    await m.answer(
+        f"✅ Игрок {link_user(uid)} получил {amt} ⭐.\nНовый баланс: {new_bal} ⭐",
+        parse_mode="HTML",
+    )
     try:
         await bot.send_message(uid, f"💎 Тебе начислено {amt} ⭐.\nТекущий баланс: {new_bal} ⭐")
     except Exception:
         pass
-
-
 
 
 # ==================== ADMIN ====================
@@ -795,14 +968,17 @@ async def cmd_allbalances(m: Message):
 async def cmd_whoami(m: Message):
     await m.answer(f"Твой user_id: {m.from_user.id}\nАдмины: {sorted(ADMIN_IDS)}")
 
+
 @dp.message(Command("envcheck"))
 async def cmd_envcheck(m: Message):
     if not is_admin(m.from_user.id):
         return await m.answer("⛔ Доступ запрещён.")
     await m.answer(f"Загружены ADMIN_IDS: {sorted(ADMIN_IDS)}")
 
+
 # ==================== ENTRY ====================
 if __name__ == "__main__":
     async def main():
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+
     asyncio.run(main())
