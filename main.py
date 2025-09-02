@@ -934,7 +934,7 @@ async def cmd_roll(m: Message):
     if mv.game_mode != "dice3":
         return await m.reply("Сейчас активен режим 🎰. Используй /spin или отправь 🎰.")
 
-    # 👉 проверяем лимит бросков ДО кулдауна/отправки
+    # проверяем лимит бросков ДО кулдауна/отправки
     slot = 1 if uid == mv.p1_id else 2
     st = db.get_dice_state(mv.id)
     my_cnt = int(st["p1_dice_cnt"] if slot == 1 else st["p2_dice_cnt"])
@@ -948,21 +948,29 @@ async def cmd_roll(m: Message):
     mark_cooldown(uid)
     await show_cooldown(m.chat.id, uid, COOLDOWN_SEC)
 
-    # отправляем реальный бросок
+    # сам бросок (анимация увидишь у себя)
     my_msg = await bot.send_dice(m.chat.id, emoji="🎲")
-    ...
+
+    opponent_id = mv.p2_id if uid == mv.p1_id else mv.p1_id
+
     if my_msg.dice:
-        val = int(my_msg.dice.value)
-        # 👉 добавляем с условием, могло уже стать 3 из-за гонки
+        val = int(my_msg.dice.value)  # 1..6
+
+        # условный апдейт в БД (защита от гонок)
         accepted = db.add_dice_throw(mv.id, slot, val)
         if not accepted:
-            # бросок не засчитан (уже было 3) — просто сообщим и выйдем
             return await m.reply("Бросок не засчитан: у тебя уже 3/3.")
 
-        st = db.get_dice_state(mv.id)
-        p1_sum, p2_sum = int(st["p1_dice_sum"]), int(st["p2_dice_sum"])
-        p1_cnt, p2_cnt = int(st["p1_dice_cnt"]), int(st["p2_dice_cnt"])
-        ...
+        st2 = db.get_dice_state(mv.id)
+        p1_sum, p2_sum = int(st2["p1_dice_sum"]), int(st2["p2_dice_sum"])
+        p1_cnt, p2_cnt = int(st2["p1_dice_cnt"]), int(st2["p2_dice_cnt"])
+
+        # ЯВНЫЕ апдейты обоим
+        await bot.send_message(uid, f"🎲 Тебе выпало: {val}. Броски: {p1_cnt}/3 vs {p2_cnt}/3. Сумма: {p1_sum} vs {p2_sum}.")
+        if opponent_id:
+            await bot.send_message(opponent_id, f"🎲 У соперника выпало: {val}. Броски: {p1_cnt}/3 vs {p2_cnt}/3. Сумма: {p1_sum} vs {p2_sum}.", parse_mode="HTML")
+
+        # финал, если у обоих по 3
         if p1_cnt >= 3 and p2_cnt >= 3:
             if p1_sum > p2_sum:
                 await on_win(mv.p1_id, mv)
@@ -972,11 +980,12 @@ async def cmd_roll(m: Message):
                 await on_draw_sum(mv, p1_sum)
 
 
+
 # ==================== GAME: user-sent 🎲 (DICE3) ====================
 @dp.message(F.dice)
 async def handle_any_dice3(m: Message):
     if m.dice.emoji != DiceEmoji.DICE:
-        return
+        return  # это не 🎲 — пусть обработают другие
 
     if is_forwarded(m):
         return await m.reply("❌ Пересылать чужие броски запрещено. Отправь свой 🎲 или используй /roll.")
@@ -990,7 +999,7 @@ async def handle_any_dice3(m: Message):
     if mv.game_mode != "dice3":
         return await m.reply("Сейчас активен режим 🎰. Используй /spin или отправь 🎰.")
 
-    # 👉 проверка лимита до кулдауна
+    # проверка лимита до кулдауна
     slot = 1 if uid == mv.p1_id else 2
     st0 = db.get_dice_state(mv.id)
     my_cnt0 = int(st0["p1_dice_cnt"] if slot == 1 else st0["p2_dice_cnt"])
@@ -1005,8 +1014,8 @@ async def handle_any_dice3(m: Message):
     await show_cooldown(m.chat.id, uid, COOLDOWN_SEC)
 
     val = int(m.dice.value)
+    opponent_id = mv.p2_id if uid == mv.p1_id else mv.p1_id
 
-    # 👉 условный апдейт в БД
     accepted = db.add_dice_throw(mv.id, slot, val)
     if not accepted:
         return await m.reply("Бросок не засчитан: у тебя уже 3/3.")
@@ -1014,7 +1023,11 @@ async def handle_any_dice3(m: Message):
     st = db.get_dice_state(mv.id)
     p1_sum, p2_sum = int(st["p1_dice_sum"]), int(st["p2_dice_sum"])
     p1_cnt, p2_cnt = int(st["p1_dice_cnt"]), int(st["p2_dice_cnt"])
-    ...
+
+    await bot.send_message(uid, f"🎲 Тебе выпало: {val}. Броски: {p1_cnt}/3 vs {p2_cnt}/3. Сумма: {p1_sum} vs {p2_sum}.")
+    if opponent_id:
+        await bot.send_message(opponent_id, f"🎲 У соперника выпало: {val}. Броски: {p1_cnt}/3 vs {p2_cnt}/3. Сумма: {p1_sum} vs {p2_sum}.", parse_mode="HTML")
+
     if p1_cnt >= 3 and p2_cnt >= 3:
         if p1_sum > p2_sum:
             await on_win(mv.p1_id, mv)
@@ -1022,6 +1035,7 @@ async def handle_any_dice3(m: Message):
             await on_win(mv.p2_id, mv)
         else:
             await on_draw_sum(mv, p1_sum)
+
 
 
 # ==================== WIN / DRAW LOGIC ====================
