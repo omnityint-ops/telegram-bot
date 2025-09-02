@@ -479,7 +479,8 @@ async def cmd_start(m: Message):
 @dp.message(Command("balance"))
 async def cmd_balance(m: Message):
     bal = db.get_balance(m.from_user.id)
-    await m.answer(f"Твой призовой баланс: {bal} ⭐️")
+    await m.answer(f"Твой баланс: {bal} ⭐️")
+
 
 
 @dp.message(Command("withdraw"))
