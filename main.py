@@ -838,12 +838,10 @@ async def on_success_payment(m: Message):
 
 # ==================== GAME: user-sent 🎰 (SLOTS) ====================
 @dp.message(F.dice)
-async def handle_any_slots(m: Message):
-    if m.dice.emoji != DiceEmoji.SLOT_MACHINE:
-        return  # это не 🎰 — даст дорогу другому хендлеру
-
+async def handle_any_dice(m: Message):
+    # запрет на пересыл
     if is_forwarded(m):
-        return await m.reply("❌ Пересылать чужие броски запрещено. Отправь свой 🎰.")
+        return await m.reply("❌ Пересылать чужие броски запрещено. Отправь свой 🎰/🎲.")
 
     uid = m.from_user.id
     mv = row_to_match(db.get_match_by_user(uid))
@@ -851,73 +849,54 @@ async def handle_any_slots(m: Message):
         return await m.reply("Матч не найден или уже завершён. /join")
     if not mv.active:
         return await m.reply("Матч ещё не стартовал. Ждём оплату обоих.")
-    if mv.game_mode != "slots":
-        return await m.reply("Сейчас активен режим 🎲. Отправь 🎲.")
 
+    emoji = m.dice.emoji
+
+    # режим/эмодзи должны совпадать
+    if mv.game_mode == "slots" and emoji != DiceEmoji.SLOT_MACHINE:
+        return await m.reply("Сейчас идёт режим 🎰. Отправляй 🎰.")
+    if mv.game_mode == "dice3" and emoji != DiceEmoji.DICE:
+        return await m.reply("Сейчас идёт режим 🎲. Отправляй 🎲.")
+
+    # КД (общий для обоих режимов)
     if not cooldown_ready(uid):
-        await show_cooldown(m.chat.id, uid, COOLDOWN_SEC - int(time.time() - last_spin_time.get(uid, 0)))
+        remain = COOLDOWN_SEC - int(time.time() - last_spin_time.get(uid, 0))
+        if remain < 0: remain = 0
+        await show_cooldown(m.chat.id, uid, remain)
         return
 
     mark_cooldown(uid)
     await show_cooldown(m.chat.id, uid, COOLDOWN_SEC)
 
-    val = m.dice.value
     opponent_id = mv.p2_id if uid == mv.p1_id else mv.p1_id
+    val = int(m.dice.value)
 
-    # текстовые апдейты обоим (без пересылок)
-    try:
-        await bot.send_message(uid, f"🎰 ты выбил: {val}.")
-        if opponent_id:
-            await bot.send_message(opponent_id, f"🎰 у соперника выпало: {val}.", parse_mode="HTML")
-    except Exception as e:
-        print("send_message failed:", repr(e))
+    # ======== 🎰 SLOTS ========
+    if mv.game_mode == "slots":
+        try:
+            await bot.send_message(uid, f"🎰 ты выбил: {val}.")
+            if opponent_id:
+                await bot.send_message(opponent_id, f"🎰 у соперника выпало: {val}.", parse_mode="HTML")
+        except Exception:
+            pass
 
-    if is_jackpot_777(val):
-        await on_win(uid, mv)
-    elif is_triple_bar(val) and opponent_id:
-        await on_win(opponent_id, mv)
-    elif is_triple_lemon(val):
-        await on_draw_lemon(mv)
+        if is_jackpot_777(val):
+            return await on_win(uid, mv)
+        if is_triple_bar(val) and opponent_id:
+            return await on_win(opponent_id, mv)
+        if is_triple_lemon(val):
+            return await on_draw_lemon(mv)
+        return  # обычный спин — игра продолжается
 
-
-
-
-
-# ==================== GAME: user-sent 🎲 (DICE3) ====================
-@dp.message(F.dice)
-async def handle_any_dice3(m: Message):
-    if m.dice.emoji != DiceEmoji.DICE:
-        return  # это не 🎲 — другой хендлер обработает
-
-    if is_forwarded(m):
-        return await m.reply("❌ Пересылать чужие броски запрещено. Отправь свой 🎲.")
-
-    uid = m.from_user.id
-    mv = row_to_match(db.get_match_by_user(uid))
-    if not mv or mv.winner_id:
-        return await m.reply("Матч не найден или уже завершён. /join")
-    if not mv.active:
-        return await m.reply("Матч ещё не стартовал. Ждём оплату обоих.")
-    if mv.game_mode != "dice3":
-        return await m.reply("Сейчас активен режим 🎰. Отправь 🎰.")
-
-    # проверка лимита до кулдауна
+    # ======== 🎲 DICE3 ========
+    # проверка лимита бросков ДО записи
     slot = 1 if uid == mv.p1_id else 2
     st0 = db.get_dice_state(mv.id)
     my_cnt0 = int(st0["p1_dice_cnt"] if slot == 1 else st0["p2_dice_cnt"])
     if my_cnt0 >= 3:
         return await m.reply("У тебя уже 3/3 бросков. Ждём соперника.")
 
-    if not cooldown_ready(uid):
-        await show_cooldown(m.chat.id, uid, COOLDOWN_SEC - int(time.time() - last_spin_time.get(uid, 0)))
-        return
-
-    mark_cooldown(uid)
-    await show_cooldown(m.chat.id, uid, COOLDOWN_SEC)
-
-    val = int(m.dice.value)
-    opponent_id = mv.p2_id if uid == mv.p1_id else mv.p1_id
-
+    # условная запись броска (атомарно)
     accepted = db.add_dice_throw(mv.id, slot, val)
     if not accepted:
         return await m.reply("Бросок не засчитан: у тебя уже 3/3.")
@@ -926,17 +905,20 @@ async def handle_any_dice3(m: Message):
     p1_sum, p2_sum = int(st["p1_dice_sum"]), int(st["p2_dice_sum"])
     p1_cnt, p2_cnt = int(st["p1_dice_cnt"]), int(st["p2_dice_cnt"])
 
-    await bot.send_message(uid, f"🎲 тебе выпало: {val}. Броски: {p1_cnt}/3 vs {p2_cnt}/3. Сумма: {p1_sum} vs {p2_sum}.")
-    if opponent_id:
-        await bot.send_message(opponent_id, f"🎲 у соперника выпало: {val}. Броски: {p1_cnt}/3 vs {p2_cnt}/3. Сумма: {p1_sum} vs {p2_sum}.", parse_mode="HTML")
+    try:
+        await bot.send_message(uid, f"🎲 тебе выпало: {val}. Броски: {p1_cnt}/3 vs {p2_cnt}/3. Сумма: {p1_sum} vs {p2_sum}.")
+        if opponent_id:
+            await bot.send_message(opponent_id, f"🎲 у соперника выпало: {val}. Броски: {p1_cnt}/3 vs {p2_cnt}/3. Сумма: {p1_sum} vs {p2_sum}.", parse_mode="HTML")
+    except Exception:
+        pass
 
     if p1_cnt >= 3 and p2_cnt >= 3:
         if p1_sum > p2_sum:
-            await on_win(mv.p1_id, mv)
+            return await on_win(mv.p1_id, mv)
         elif p2_sum > p1_sum:
-            await on_win(mv.p2_id, mv)
+            return await on_win(mv.p2_id, mv)
         else:
-            await on_draw_sum(mv, p1_sum)
+            return await on_draw_sum(mv, p1_sum)
 
 
 
