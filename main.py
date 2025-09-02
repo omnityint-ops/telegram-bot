@@ -275,14 +275,24 @@ class DB:
             """, (match_id,))
             return cur.fetchone()
 
-    def add_dice_throw(self, match_id: int, slot: int, value: int):
-        sum_col = "p1_dice_sum" if slot == 1 else "p2_dice_sum"
-        cnt_col = "p1_dice_cnt" if slot == 1 else "p2_dice_cnt"
-        with self.conn.cursor() as cur:
-            cur.execute(
-                f"UPDATE matches SET {sum_col}={sum_col}+%s, {cnt_col}={cnt_col}+1 WHERE id=%s",
-                (value, match_id),
-            )
+    def add_dice_throw(self, match_id: int, slot: int, value: int) -> bool:
+    """
+    Добавляет бросок ТОЛЬКО если у игрока ещё < 3 бросков.
+    Возвращает True, если апдейт произошёл (бросок засчитан), иначе False.
+    """
+    sum_col = "p1_dice_sum" if slot == 1 else "p2_dice_sum"
+    cnt_col = "p1_dice_cnt" if slot == 1 else "p2_dice_cnt"
+    with self.conn.cursor() as cur:
+        cur.execute(
+            f"""
+            UPDATE matches
+               SET {sum_col} = {sum_col} + %s,
+                   {cnt_col} = {cnt_col} + 1
+             WHERE id = %s AND {cnt_col} < 3
+            """,
+            (value, match_id),
+        )
+        return cur.rowcount > 0
 
 # ==================== MODELS / HELPERS ====================
 @dataclass
@@ -923,6 +933,13 @@ async def cmd_roll(m: Message):
     if mv.game_mode != "dice3":
         return await m.reply("Сейчас активен режим 🎰. Используй /spin или отправь 🎰.")
 
+    # 👉 проверяем лимит бросков ДО кулдауна/отправки
+    slot = 1 if uid == mv.p1_id else 2
+    st = db.get_dice_state(mv.id)
+    my_cnt = int(st["p1_dice_cnt"] if slot == 1 else st["p2_dice_cnt"])
+    if my_cnt >= 3:
+        return await m.reply("У тебя уже 3/3 бросков в этом матче. Ждём соперника.")
+
     if not cooldown_ready(uid):
         await show_cooldown(m.chat.id, uid, COOLDOWN_SEC - int(time.time() - last_spin_time.get(uid, 0)))
         return
@@ -930,47 +947,35 @@ async def cmd_roll(m: Message):
     mark_cooldown(uid)
     await show_cooldown(m.chat.id, uid, COOLDOWN_SEC)
 
+    # отправляем реальный бросок
     my_msg = await bot.send_dice(m.chat.id, emoji="🎲")
-
-    opponent_id = mv.p2_id if uid == mv.p1_id else mv.p1_id
-    if opponent_id:
-        try:
-            await bot.send_message(opponent_id, f"{link_user(uid)} бросает кубик…", parse_mode="HTML")
-            await bot.forward_message(chat_id=opponent_id, from_chat_id=m.chat.id, message_id=my_msg.message_id)
-        except Exception:
-            pass
-
+    ...
     if my_msg.dice:
-        val = int(my_msg.dice.value)  # 1..6
-        p1_id, p2_id = mv.p1_id, mv.p2_id
-        slot = 1 if uid == p1_id else 2
+        val = int(my_msg.dice.value)
+        # 👉 добавляем с условием, могло уже стать 3 из-за гонки
+        accepted = db.add_dice_throw(mv.id, slot, val)
+        if not accepted:
+            # бросок не засчитан (уже было 3) — просто сообщим и выйдем
+            return await m.reply("Бросок не засчитан: у тебя уже 3/3.")
 
-        db.add_dice_throw(mv.id, slot, val)
         st = db.get_dice_state(mv.id)
         p1_sum, p2_sum = int(st["p1_dice_sum"]), int(st["p2_dice_sum"])
         p1_cnt, p2_cnt = int(st["p1_dice_cnt"]), int(st["p2_dice_cnt"])
-
-        prog = f"Броски: {p1_cnt}/3 vs {p2_cnt}/3. Сумма: {p1_sum} vs {p2_sum}."
-        try:
-            await bot.send_message(p1_id, f"🎲 Выпало {val}. {prog}")
-            if p2_id:
-                await bot.send_message(p2_id, f"🎲 У соперника выпало {val}. {prog}")
-        except Exception:
-            pass
-
+        ...
         if p1_cnt >= 3 and p2_cnt >= 3:
             if p1_sum > p2_sum:
-                await on_win(p1_id, mv)
+                await on_win(mv.p1_id, mv)
             elif p2_sum > p1_sum:
-                await on_win(p2_id, mv)
+                await on_win(mv.p2_id, mv)
             else:
                 await on_draw_sum(mv, p1_sum)
+
 
 # ==================== GAME: user-sent 🎲 (DICE3) ====================
 @dp.message(F.dice)
 async def handle_any_dice3(m: Message):
     if m.dice.emoji != DiceEmoji.DICE:
-        return  # не 🎲 — другой хендлер разберёт
+        return
 
     if is_forwarded(m):
         return await m.reply("❌ Пересылать чужие броски запрещено. Отправь свой 🎲 или используй /roll.")
@@ -984,6 +989,13 @@ async def handle_any_dice3(m: Message):
     if mv.game_mode != "dice3":
         return await m.reply("Сейчас активен режим 🎰. Используй /spin или отправь 🎰.")
 
+    # 👉 проверка лимита до кулдауна
+    slot = 1 if uid == mv.p1_id else 2
+    st0 = db.get_dice_state(mv.id)
+    my_cnt0 = int(st0["p1_dice_cnt"] if slot == 1 else st0["p2_dice_cnt"])
+    if my_cnt0 >= 3:
+        return await m.reply("У тебя уже 3/3 бросков. Ждём соперника.")
+
     if not cooldown_ready(uid):
         await show_cooldown(m.chat.id, uid, COOLDOWN_SEC - int(time.time() - last_spin_time.get(uid, 0)))
         return
@@ -992,31 +1004,16 @@ async def handle_any_dice3(m: Message):
     await show_cooldown(m.chat.id, uid, COOLDOWN_SEC)
 
     val = int(m.dice.value)
-    opponent_id = mv.p2_id if uid == mv.p1_id else mv.p1_id
-    if opponent_id:
-        try:
-            await bot.send_message(opponent_id, f"{link_user(uid)} бросает кубик…", parse_mode="HTML")
-            await bot.forward_message(chat_id=opponent_id, from_chat_id=m.chat.id, message_id=m.message_id)
-        except Exception:
-            try:
-                await bot.send_message(opponent_id, f"{link_user(uid)} выбил: {val}", parse_mode="HTML")
-            except Exception:
-                pass
 
-    slot = 1 if uid == mv.p1_id else 2
-    db.add_dice_throw(mv.id, slot, val)
+    # 👉 условный апдейт в БД
+    accepted = db.add_dice_throw(mv.id, slot, val)
+    if not accepted:
+        return await m.reply("Бросок не засчитан: у тебя уже 3/3.")
+
     st = db.get_dice_state(mv.id)
     p1_sum, p2_sum = int(st["p1_dice_sum"]), int(st["p2_dice_sum"])
     p1_cnt, p2_cnt = int(st["p1_dice_cnt"]), int(st["p2_dice_cnt"])
-
-    prog = f"Броски: {p1_cnt}/3 vs {p2_cnt}/3. Сумма: {p1_sum} vs {p2_sum}."
-    try:
-        await bot.send_message(mv.p1_id, f"🎲 Выпало {val}. {prog}")
-        if mv.p2_id:
-            await bot.send_message(mv.p2_id, f"🎲 У соперника выпало {val}. {prog}")
-    except Exception:
-        pass
-
+    ...
     if p1_cnt >= 3 and p2_cnt >= 3:
         if p1_sum > p2_sum:
             await on_win(mv.p1_id, mv)
@@ -1024,6 +1021,7 @@ async def handle_any_dice3(m: Message):
             await on_win(mv.p2_id, mv)
         else:
             await on_draw_sum(mv, p1_sum)
+
 
 # ==================== WIN / DRAW LOGIC ====================
 async def on_win(winner_id: int, mv: MatchView):
