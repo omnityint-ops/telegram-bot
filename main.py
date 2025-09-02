@@ -641,34 +641,37 @@ async def cb_stake(cq: CallbackQuery):
             f"Подключился соперник: {link_user(uid)}.\nРежим: {MODE_LABEL[mode]}\nГотовим старт матча…",
             parse_mode="HTML",
         )
-        # Пытаемся списать/автодоплатить у обоих
+
+        # Выставляем оплату обоим
         for pid in (uid, opp):
             await try_auto_pay_and_invoice(match_id, pid, stake)
 
-        # Если оба оплатили — стартуем
         if db.can_start(match_id):
             db.start_match(match_id)
-            mrow = db.get_match_by_user(uid)
-            mv2 = row_to_match(mrow)
+            row2 = db.get_match_by_user(uid)
+            mv2 = row_to_match(row2)
             last_spin_time.pop(mv2.p1_id, None)
             if mv2.p2_id:
                 last_spin_time.pop(mv2.p2_id, None)
 
-            # стало:
-            if mode == "slots":
-                text = (f"Матч начался! Режим {MODE_LABEL[mode]}. Ставка {mv2.stake} ⭐ (комиссия {FEE_PCT}%). "
-                        f"Приз: {prize_after_fee(mv2.stake)} ⭐. Отправляй 🎰.")
-            else:
-                text = (f"Матч начался! Режим {MODE_LABEL[mode]} — 3 броска, сумма больше выигрывает. "
-                        f"Ставка {mv2.stake} ⭐ (комиссия {FEE_PCT}%). Приз: {prize_after_fee(mv2.stake)} ⭐. "
-                        f"Отправляй 🎲.")
+            text = (
+                f"Матч начался! Режим {MODE_LABEL[mode]}. "
+                f"Ставка {mv2.stake} ⭐ (комиссия {FEE_PCT}%). "
+                f"Приз: {prize_after_fee(mv2.stake)} ⭐. "
+                + ("Отправляй 🎰." if mode == "slots" else "Отправляй 🎲.")
+            )
             await bot.send_message(mv2.p1_id, text)
             if mv2.p2_id:
                 await bot.send_message(mv2.p2_id, text)
-
         else:
-            db.add_to_queue(uid, stake, mode=mode)
-            await cq.message.answer(f"Ты в очереди на {MODE_LABEL[mode]} со ставкой {stake} ⭐. Ждём соперника!")
+            # Матч создан, ждём оплату (не добавляем в очередь!)
+            await bot.send_message(uid, "🧾 Счёт выставлен. Оплати ставку — матч стартует автоматически.")
+            await bot.send_message(opp, "🧾 Счёт выставлен. Оплати ставку — матч стартует автоматически.")
+    else:
+        # Соперника нет — ставим в очередь
+        db.add_to_queue(uid, stake, mode=mode)
+        await cq.message.answer(f"Ты в очереди на {MODE_LABEL[mode]} со ставкой {stake} ⭐. Ждём соперника!")
+
 
 
 
@@ -779,9 +782,9 @@ async def on_success_payment(m: Message):
                         f"Приз: {prize_after_fee(mv.stake)} ⭐. "
                         + ("Отправляй 🎰." if mv.game_mode == "slots" else "Отправляй 🎲.")
                     )
-    await bot.send_message(mv.p1_id, text)
-    if mv.p2_id:
-        await bot.send_message(mv.p2_id, text)
+                    await bot.send_message(mv.p1_id, text)
+                    if mv.p2_id:
+                        await bot.send_message(mv.p2_id, text)
 
         return
 
