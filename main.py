@@ -12,7 +12,7 @@ from aiogram.filters import Command
 from aiogram.types import (
     Message, LabeledPrice, PreCheckoutQuery,
     InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery,
-    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+    ReplyKeyboardRemove
 )
 from aiogram.enums.dice_emoji import DiceEmoji
 from dotenv import load_dotenv
@@ -379,13 +379,6 @@ def topup_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[[InlineKeyboardButton(text=t, callback_data=cb) for t, cb in row] for row in rows]
     )
 
-spin_kb = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text="/spin")]],
-    resize_keyboard=True,
-    one_time_keyboard=False,
-    input_field_placeholder="Жми /spin или отправь 🎰",
-)
-
 def is_forwarded(msg: Message) -> bool:
     # если сообщение переслано — у него есть forward_date / forward_origin
     return bool(getattr(msg, "forward_date", None) or getattr(msg, "forward_origin", None))
@@ -517,17 +510,18 @@ async def cmd_start(m: Message):
         "🎰 PVP-Game 1v1!\n\n"
         "Режимы:\n"
         "• 🎰 777 — победа при 777; BAR-BAR-BAR — мгновенный проигрыш бросившего; 🍋🍋🍋 — ничья (возврат минус комиссия).\n"
-        "• 🎲 3 броска — каждый делает 3 броска кубиком; у кого сумма больше — тот победил; равенство — ничья (возврат минус комиссия).\n"
+        "• 🎲 3 броска — каждый делает 3 броска кубиком; у кого сумма больше — победа; равенство — ничья (возврат минус комиссия).\n"
         f"• Комиссия — {FEE_PCT}%.\n\n"
         "Как играть:\n"
         "1) Выбери режим через /mode (или кнопкой «🎮 Режим» в меню).\n"
         "2) Жми «🟢 В очередь» и выбери ставку. При подборе соперника обоим приходит оплата: списание с баланса или инвойс.\n"
-        "3) После старта:\n"
-        "   • 🎰 — крути /spin (или отправляй 🎰).\n"
-        "   • 🎲 — бросай /roll (или отправляй 🎲).\n"
-        f"4) КД между действиями — {COOLDOWN_SEC} сек (бот покажет таймер).\n\n"
+        "3) После старта матча:\n"
+        "   • в режиме 🎰 — просто отправляй эмодзи 🎰;\n"
+        "   • в режиме 🎲 — просто отправляй эмодзи 🎲.\n"
+        f"4) КД между бросками — {COOLDOWN_SEC} сек (бот покажет таймер).\n\n"
         "Удачи на Арене!"
     )
+
     await m.answer(text, reply_markup=kb, disable_web_page_preview=True)
 
 @dp.message(Command("mode"))
@@ -660,19 +654,23 @@ async def cb_stake(cq: CallbackQuery):
             if mv2.p2_id:
                 last_spin_time.pop(mv2.p2_id, None)
 
+            # стало:
             if mode == "slots":
                 text = (f"Матч начался! Режим {MODE_LABEL[mode]}. Ставка {mv2.stake} ⭐ (комиссия {FEE_PCT}%). "
-                        f"Приз: {prize_after_fee(mv2.stake)} ⭐. /spin или отправляй 🎰.")
+                        f"Приз: {prize_after_fee(mv2.stake)} ⭐. Отправляй 🎰.")
             else:
                 text = (f"Матч начался! Режим {MODE_LABEL[mode]} — 3 броска, сумма больше выигрывает. "
                         f"Ставка {mv2.stake} ⭐ (комиссия {FEE_PCT}%). Приз: {prize_after_fee(mv2.stake)} ⭐. "
-                        f"/roll или отправляй 🎲.")
-            await bot.send_message(mv2.p1_id, text, reply_markup=spin_kb)
+                        f"Отправляй 🎲.")
+            await bot.send_message(mv2.p1_id, text)
             if mv2.p2_id:
-                await bot.send_message(mv2.p2_id, text, reply_markup=spin_kb)
-    else:
-        db.add_to_queue(uid, stake, mode=mode)
-        await cq.message.answer(f"Ты в очереди на {MODE_LABEL[mode]} со ставкой {stake} ⭐. Ждём соперника!")
+                await bot.send_message(mv2.p2_id, text)
+
+        else:
+            db.add_to_queue(uid, stake, mode=mode)
+            await cq.message.answer(f"Ты в очереди на {MODE_LABEL[mode]} со ставкой {stake} ⭐. Ждём соперника!")
+
+
 
 @dp.callback_query(F.data == "topup_open")
 async def cb_topup_open(cq: CallbackQuery):
@@ -776,13 +774,15 @@ async def on_success_payment(m: Message):
                     if mv.p2_id:
                         last_spin_time.pop(mv.p2_id, None)
                     text = (
-                        f"Матч начался! Режим {MODE_LABEL[mv.game_mode]}. Ставка {mv.stake} ⭐ (комиссия {FEE_PCT}%). "
+                        f"Матч начался! Режим {MODE_LABEL[mv.game_mode]}. "
+                        f"Ставка {mv.stake} ⭐ (комиссия {FEE_PCT}%). "
                         f"Приз: {prize_after_fee(mv.stake)} ⭐. "
-                        + ("/spin или отправляй 🎰." if mv.game_mode == "slots" else "/roll или отправляй 🎲.")
+                        + ("Отправляй 🎰." if mv.game_mode == "slots" else "Отправляй 🎲.")
                     )
-                    await bot.send_message(mv.p1_id, text, reply_markup=spin_kb)
-                    if mv.p2_id:
-                        await bot.send_message(mv.p2_id, text, reply_markup=spin_kb)
+    await bot.send_message(mv.p1_id, text)
+    if mv.p2_id:
+        await bot.send_message(mv.p2_id, text)
+
         return
 
     # 2) Доплата дефицита для матча
@@ -816,13 +816,14 @@ async def on_success_payment(m: Message):
             mv = row_to_match(row)
             mode = mv.game_mode if mv else "slots"
             text = (
-                f"Матч начался! Режим {MODE_LABEL.get(mode, mode)}. Ставка {stake} ⭐ (комиссия {FEE_PCT}%). "
+                f"Матч начался! Режим {MODE_LABEL.get(mode, mode)}. "
+                f"Ставка {stake} ⭐ (комиссия {FEE_PCT}%). "
                 f"Приз: {prize_after_fee(stake)} ⭐. "
-                + ("/spin или отправляй 🎰." if mode == "slots" else "/roll или отправляй 🎲.")
+                + ("Отправляй 🎰." if mode == "slots" else "Отправляй 🎲.")
             )
-            await bot.send_message(p1_id, text, reply_markup=spin_kb)
+            await bot.send_message(p1_id, text)
             if p2_id:
-                await bot.send_message(p2_id, text, reply_markup=spin_kb)
+                await bot.send_message(p2_id, text)
         else:
             await m.answer("✅ Оплата принята. Ожидаем соперника.")
         return
@@ -830,57 +831,16 @@ async def on_success_payment(m: Message):
     # 3) Старые payload-ы (совместимость)
     await m.answer("Оплата получена. Если это пополнение — пожалуйста, используйте /topup в следующий раз.")
 
-# ==================== GAME: /spin (SLOTS) ====================
-@dp.message(Command("spin"))
-async def cmd_spin(m: Message):
-    uid = m.from_user.id
-    mv = row_to_match(db.get_match_by_user(uid))
-    if not mv or mv.winner_id:
-        return await m.reply("Матч не найден или уже завершён. /join")
-    if not mv.active:
-        return await m.reply("Матч ещё не стартовал. Ждём оплату обоих.")
-    if mv.game_mode != "slots":
-        return await m.reply("Сейчас активен режим 🎲. Используй /roll или отправь 🎲.")
 
-    if not cooldown_ready(uid):
-        await show_cooldown(m.chat.id, uid, COOLDOWN_SEC - int(time.time() - last_spin_time.get(uid, 0)))
-        return
-
-    mark_cooldown(uid)
-    await show_cooldown(m.chat.id, uid, COOLDOWN_SEC)
-
-    # отправляем 🎰 В ЧАТ ИГРОКА -> видно СПРАВА у него
-    my_msg = await bot.send_dice(m.chat.id, emoji="🎰")
-
-    # пересылаем ОППОНЕНТУ -> у него это будет слева
-    opponent_id = mv.p2_id if uid == mv.p1_id else mv.p1_id
-    if opponent_id:
-        try:
-            await bot.send_message(opponent_id, f"{link_user(uid)} крутит барабан…", parse_mode="HTML")
-            await bot.forward_message(chat_id=opponent_id, from_chat_id=m.chat.id, message_id=my_msg.message_id)
-        except Exception:
-            pass
-
-    if my_msg.dice:
-        val = my_msg.dice.value
-        if is_jackpot_777(val):
-            await on_win(uid, mv)
-        elif is_triple_bar(val) and opponent_id:
-            # BAR BAR BAR — мгновенный проигрыш бросившего ⇒ победитель соперник
-            await on_win(opponent_id, mv)
-        elif is_triple_lemon(val):
-            # 🍋🍋🍋 — ничья с удержанием комиссии
-            await on_draw_lemon(mv)
 
 # ==================== GAME: user-sent 🎰 (SLOTS) ====================
 @dp.message(F.dice)
 async def handle_any_slots(m: Message):
     if m.dice.emoji != DiceEmoji.SLOT_MACHINE:
-        return  # не слот — пусть обработают другие хендлеры
+        return  # это не 🎰 — даст дорогу другому хендлеру
 
-    # запрет «читов» — пересланные броски не считаем
     if is_forwarded(m):
-        return await m.reply("❌ Пересылать чужие броски запрещено. Отправь свой 🎰 или используй /spin.")
+        return await m.reply("❌ Пересылать чужие броски запрещено. Отправь свой 🎰.")
 
     uid = m.from_user.id
     mv = row_to_match(db.get_match_by_user(uid))
@@ -889,7 +849,7 @@ async def handle_any_slots(m: Message):
     if not mv.active:
         return await m.reply("Матч ещё не стартовал. Ждём оплату обоих.")
     if mv.game_mode != "slots":
-        return await m.reply("Сейчас активен режим 🎲. Используй /roll или отправь 🎲.")
+        return await m.reply("Сейчас активен режим 🎲. Отправь 🎲.")
 
     if not cooldown_ready(uid):
         await show_cooldown(m.chat.id, uid, COOLDOWN_SEC - int(time.time() - last_spin_time.get(uid, 0)))
@@ -898,86 +858,25 @@ async def handle_any_slots(m: Message):
     mark_cooldown(uid)
     await show_cooldown(m.chat.id, uid, COOLDOWN_SEC)
 
-    opponent_id = mv.p2_id if uid == mv.p1_id else mv.p1_id
-    if opponent_id:
-        try:
-            await bot.send_message(opponent_id, f"{link_user(uid)} крутит барабан…", parse_mode="HTML")
-            await bot.forward_message(chat_id=opponent_id, from_chat_id=m.chat.id, message_id=m.message_id)
-        except Exception:
-            try:
-                await bot.send_message(
-                    opponent_id,
-                    f"{link_user(uid)} выбил значение: {m.dice.value}",
-                    parse_mode="HTML",
-                )
-            except Exception:
-                pass
-
-    if m.dice:
-        val = m.dice.value
-        if is_jackpot_777(val):
-            await on_win(uid, mv)
-        elif is_triple_bar(val) and opponent_id:
-            await on_win(opponent_id, mv)
-        elif is_triple_lemon(val):
-            await on_draw_lemon(mv)
-
-# ==================== GAME (DICE3): /roll ====================
-@dp.message(Command("roll"))
-async def cmd_roll(m: Message):
-    uid = m.from_user.id
-    mv = row_to_match(db.get_match_by_user(uid))
-    if not mv or mv.winner_id:
-        return await m.reply("Матч не найден или уже завершён. /join")
-    if not mv.active:
-        return await m.reply("Матч ещё не стартовал. Ждём оплату обоих.")
-    if mv.game_mode != "dice3":
-        return await m.reply("Сейчас активен режим 🎰. Используй /spin или отправь 🎰.")
-
-    # проверяем лимит бросков ДО кулдауна/отправки
-    slot = 1 if uid == mv.p1_id else 2
-    st = db.get_dice_state(mv.id)
-    my_cnt = int(st["p1_dice_cnt"] if slot == 1 else st["p2_dice_cnt"])
-    if my_cnt >= 3:
-        return await m.reply("У тебя уже 3/3 бросков в этом матче. Ждём соперника.")
-
-    if not cooldown_ready(uid):
-        await show_cooldown(m.chat.id, uid, COOLDOWN_SEC - int(time.time() - last_spin_time.get(uid, 0)))
-        return
-
-    mark_cooldown(uid)
-    await show_cooldown(m.chat.id, uid, COOLDOWN_SEC)
-
-    # сам бросок (анимация увидишь у себя)
-    my_msg = await bot.send_dice(m.chat.id, emoji="🎲")
-
+    val = m.dice.value
     opponent_id = mv.p2_id if uid == mv.p1_id else mv.p1_id
 
-    if my_msg.dice:
-        val = int(my_msg.dice.value)  # 1..6
-
-        # условный апдейт в БД (защита от гонок)
-        accepted = db.add_dice_throw(mv.id, slot, val)
-        if not accepted:
-            return await m.reply("Бросок не засчитан: у тебя уже 3/3.")
-
-        st2 = db.get_dice_state(mv.id)
-        p1_sum, p2_sum = int(st2["p1_dice_sum"]), int(st2["p2_dice_sum"])
-        p1_cnt, p2_cnt = int(st2["p1_dice_cnt"]), int(st2["p2_dice_cnt"])
-
-        # ЯВНЫЕ апдейты обоим
-        await bot.send_message(uid, f"🎲 Тебе выпало: {val}. Броски: {p1_cnt}/3 vs {p2_cnt}/3. Сумма: {p1_sum} vs {p2_sum}.")
+    # текстовые апдейты обоим (без пересылок)
+    try:
+        await bot.send_message(uid, f"🎰 ты выбил: {val}.")
         if opponent_id:
-            await bot.send_message(opponent_id, f"🎲 У соперника выпало: {val}. Броски: {p1_cnt}/3 vs {p2_cnt}/3. Сумма: {p1_sum} vs {p2_sum}.", parse_mode="HTML")
+            await bot.send_message(opponent_id, f"🎰 у соперника выпало: {val}.", parse_mode="HTML")
+    except Exception as e:
+        print("send_message failed:", repr(e))
 
-        # финал, если у обоих по 3
-        if p1_cnt >= 3 and p2_cnt >= 3:
-            if p1_sum > p2_sum:
-                await on_win(mv.p1_id, mv)
-            elif p2_sum > p1_sum:
-                await on_win(mv.p2_id, mv)
-            else:
-                await on_draw_sum(mv, p1_sum)
+    if is_jackpot_777(val):
+        await on_win(uid, mv)
+    elif is_triple_bar(val) and opponent_id:
+        await on_win(opponent_id, mv)
+    elif is_triple_lemon(val):
+        await on_draw_lemon(mv)
+
+
 
 
 
@@ -985,10 +884,10 @@ async def cmd_roll(m: Message):
 @dp.message(F.dice)
 async def handle_any_dice3(m: Message):
     if m.dice.emoji != DiceEmoji.DICE:
-        return  # это не 🎲 — пусть обработают другие
+        return  # это не 🎲 — другой хендлер обработает
 
     if is_forwarded(m):
-        return await m.reply("❌ Пересылать чужие броски запрещено. Отправь свой 🎲 или используй /roll.")
+        return await m.reply("❌ Пересылать чужие броски запрещено. Отправь свой 🎲.")
 
     uid = m.from_user.id
     mv = row_to_match(db.get_match_by_user(uid))
@@ -997,7 +896,7 @@ async def handle_any_dice3(m: Message):
     if not mv.active:
         return await m.reply("Матч ещё не стартовал. Ждём оплату обоих.")
     if mv.game_mode != "dice3":
-        return await m.reply("Сейчас активен режим 🎰. Используй /spin или отправь 🎰.")
+        return await m.reply("Сейчас активен режим 🎰. Отправь 🎰.")
 
     # проверка лимита до кулдауна
     slot = 1 if uid == mv.p1_id else 2
@@ -1024,9 +923,9 @@ async def handle_any_dice3(m: Message):
     p1_sum, p2_sum = int(st["p1_dice_sum"]), int(st["p2_dice_sum"])
     p1_cnt, p2_cnt = int(st["p1_dice_cnt"]), int(st["p2_dice_cnt"])
 
-    await bot.send_message(uid, f"🎲 Тебе выпало: {val}. Броски: {p1_cnt}/3 vs {p2_cnt}/3. Сумма: {p1_sum} vs {p2_sum}.")
+    await bot.send_message(uid, f"🎲 тебе выпало: {val}. Броски: {p1_cnt}/3 vs {p2_cnt}/3. Сумма: {p1_sum} vs {p2_sum}.")
     if opponent_id:
-        await bot.send_message(opponent_id, f"🎲 У соперника выпало: {val}. Броски: {p1_cnt}/3 vs {p2_cnt}/3. Сумма: {p1_sum} vs {p2_sum}.", parse_mode="HTML")
+        await bot.send_message(opponent_id, f"🎲 у соперника выпало: {val}. Броски: {p1_cnt}/3 vs {p2_cnt}/3. Сумма: {p1_sum} vs {p2_sum}.", parse_mode="HTML")
 
     if p1_cnt >= 3 and p2_cnt >= 3:
         if p1_sum > p2_sum:
@@ -1035,6 +934,7 @@ async def handle_any_dice3(m: Message):
             await on_win(mv.p2_id, mv)
         else:
             await on_draw_sum(mv, p1_sum)
+
 
 
 
