@@ -2,7 +2,7 @@ import os
 import time
 import asyncio
 from dataclasses import dataclass
-from typing import Optional, Dict, Tuple, Mapping, Any
+from typing import Optional, Dict, Tuple, Mapping, Any 
 
 import psycopg
 from psycopg.rows import dict_row
