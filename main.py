@@ -482,14 +482,21 @@ def is_forwarded(msg: Message) -> bool:
 
 
 # ==================== GLOBALS ====================
+from aiogram.client.session.aiohttp import AiohttpSession
+
 db = DB(DATABASE_URL)
-bot = Bot(BOT_TOKEN)
+
+# увеличим таймаут HTTP запросов к Telegram (например, до 30 сек)
+session = AiohttpSession(timeout=30)
+bot = Bot(BOT_TOKEN, session=session)
+
 dp = Dispatcher()
 payments_router = Router()
 dp.include_router(payments_router)
 
-last_spin_time: Dict[int, float] = {}
-cooldown_tasks: Dict[int, asyncio.Task] = {}
+# кэш username бота (чтобы не вызывать get_me() в хэндлерах)
+BOT_USERNAME: Optional[str] = None
+
 
 
 # ==================== VISUAL COOLDOWN ====================
@@ -659,9 +666,22 @@ async def cmd_start(m: Message):
 
 @dp.message(Command("ref"))
 async def cmd_ref(m: Message):
-    me = await bot.get_me()
-    username = me.username
-    link = f"https://t.me/{username}?start=ref_{m.from_user.id}"
+    global BOT_USERNAME
+
+    # если по какой-то причине не закэшировался — пробуем один раз получить здесь,
+    # но не падаем, если опять таймаут
+    if not BOT_USERNAME:
+        try:
+            me = await bot.get_me()
+            BOT_USERNAME = me.username
+        except Exception:
+            BOT_USERNAME = None
+
+    if BOT_USERNAME:
+        link = f"https://t.me/{BOT_USERNAME}?start=ref_{m.from_user.id}"
+    else:
+        link = "— не удалось получить ссылку, попробуйте позже —"
+
     total, rewarded = db.count_referrals(m.from_user.id)
     text = (
         "👥 Реферальная программа\n"
@@ -671,6 +691,7 @@ async def cmd_ref(m: Message):
         f"Награда: {REF_REWARD}⭐ за каждого активированного друга."
     )
     await m.answer(text, disable_web_page_preview=True)
+
 
 @dp.message(Command("mode"))
 async def cmd_mode(m: Message):
@@ -1311,7 +1332,15 @@ async def cmd_envcheck(m: Message):
 # ==================== ENTRY ====================
 if __name__ == "__main__":
     async def main():
+        global BOT_USERNAME
+        # получим и закэшируем username бота один раз при старте
+        try:
+            me = await bot.get_me()
+            BOT_USERNAME = me.username
+        except Exception:
+            BOT_USERNAME = None  # на всякий случай, чтобы не падать при старте
+
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
-
     asyncio.run(main())
+
