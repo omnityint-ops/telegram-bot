@@ -1059,11 +1059,16 @@ async def handle_any_dice(m: Message):
     # ======== 🎰 SLOTS ========
     if mv.game_mode == "slots":
         try:
-            await bot.send_message(uid, f"🎰 ты выбил: {val}.")
+            # Ничего не пишем цифрами. Отправляем сопернику сам "бросок" как стикер/анимацию.
             if opponent_id:
-                await bot.send_message(opponent_id, f"🎰 у соперника выпало: {val}.", parse_mode="HTML")
+                await bot.copy_message(
+                    chat_id=opponent_id,
+                    from_chat_id=m.chat.id,
+                    message_id=m.message_id
+                )
         except Exception:
             pass
+
 
         if is_jackpot_777(val):
             return await on_win(uid, mv)
