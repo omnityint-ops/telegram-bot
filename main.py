@@ -28,8 +28,11 @@ ADMIN_IDS = {
     int(x) for x in (a.strip() for a in raw_admins.split(","))
     if x.strip().isdigit()
 }
+
+
 def is_admin(uid: int) -> bool:
     return uid in ADMIN_IDS
+
 
 # ==================== CONSTANTS ====================
 FEE_PCT = 10
@@ -37,14 +40,18 @@ COOLDOWN_SEC = 5
 ALLOWED_STAKES = [10, 25, 50, 100, 250, 500, 1000]
 TOPUP_AMOUNTS = [10, 25, 50, 100, 250, 500, 1000]
 MIN_WITHDRAW = 400
+REF_REWARD = 10
+
 
 def prize_after_fee(stake: int) -> int:
     # победитель получает 2*stake за вычетом комиссии
     return int(round((stake * 2) * (1 - FEE_PCT / 100)))
 
+
 def refund_each_after_fee(stake: int) -> int:
     # ничья: каждому возвращаем stake минус комиссия
     return int(round(stake * (1 - FEE_PCT / 100)))
+
 
 # ==================== GAME MODES ====================
 DEFAULT_MODE = "slots"  # 'slots' (🎰 777) или 'dice3' (🎲 3 броска)
@@ -52,6 +59,7 @@ MODE_LABEL = {
     "slots": "🎰 777",
     "dice3": "🎲 3 броска",
 }
+
 
 # ==================== DB LAYER (Postgres) ====================
 class DB:
@@ -100,6 +108,8 @@ class DB:
             cur.execute("ALTER TABLE matches ADD COLUMN IF NOT EXISTS p2_dice_sum INTEGER NOT NULL DEFAULT 0;")
             cur.execute("ALTER TABLE matches ADD COLUMN IF NOT EXISTS p1_dice_cnt INTEGER NOT NULL DEFAULT 0;")
             cur.execute("ALTER TABLE matches ADD COLUMN IF NOT EXISTS p2_dice_cnt INTEGER NOT NULL DEFAULT 0;")
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS referrer_id BIGINT;")
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS ref_rewarded BOOLEAN NOT NULL DEFAULT FALSE;")
 
     # ---- Users / Balance ----
     def get_balance(self, user_id: int) -> int:
@@ -266,7 +276,7 @@ class DB:
             row = cur.fetchone()
             return int(row["p1_id"]), (int(row["p2_id"]) if row["p2_id"] is not None else None)
 
-       # ------- Dice3 helpers -------
+    # ------- Dice3 helpers -------
     def get_dice_state(self, match_id: int) -> Optional[dict]:
         with self.conn.cursor() as cur:
             cur.execute("""
@@ -294,6 +304,54 @@ class DB:
             )
             return cur.rowcount > 0
 
+    def set_referrer_if_empty(self, user_id: int, referrer_id: int):
+        # нельзя рефералить самого себя
+        if user_id == referrer_id:
+            return
+        with self.conn.cursor() as cur:
+            # создаём пользователя, если его ещё нет (баланс 0)
+            cur.execute("""
+                INSERT INTO users(user_id, balance, referrer_id)
+                VALUES(%s, 0, %s)
+                ON CONFLICT (user_id) DO UPDATE
+                SET referrer_id = COALESCE(users.referrer_id, EXCLUDED.referrer_id)
+            """, (user_id, referrer_id))
+
+    def get_referral_state(self, user_id: int) -> Tuple[Optional[int], bool]:
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT referrer_id, ref_rewarded FROM users WHERE user_id=%s", (user_id,))
+            row = cur.fetchone()
+            if not row:
+                return None, False
+            return (row["referrer_id"], bool(row["ref_rewarded"]))
+
+    def mark_ref_rewarded(self, user_id: int):
+        with self.conn.cursor() as cur:
+            cur.execute("UPDATE users SET ref_rewarded=TRUE WHERE user_id=%s", (user_id,))
+
+    def count_referrals(self, referrer_id: int) -> Tuple[int, int]:
+        # (всего с меткой, из них вознаграждённых)
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS c FROM users WHERE referrer_id=%s", (referrer_id,))
+            total = int(cur.fetchone()["c"])
+            cur.execute("SELECT COUNT(*) AS c FROM users WHERE referrer_id=%s AND ref_rewarded=TRUE", (referrer_id,))
+            rewarded = int(cur.fetchone()["c"])
+            return total, rewarded
+
+
+    def award_referral_if_eligible(self, user_id: int) -> Optional[int]:
+        """
+        Если у user_id есть referrer_id и ещё не платили награду — платим рефереру +10⭐ и помечаем.
+        Возвращает ID реферера, если выплатили; иначе None.
+        """
+        ref_id, rewarded = self.get_referral_state(user_id)
+        if not ref_id or rewarded:
+            return None
+        # платим
+        self.add_balance(ref_id, REF_REWARD)
+        self.mark_ref_rewarded(user_id)
+        return ref_id
+
 
 # ==================== MODELS / HELPERS ====================
 @dataclass
@@ -313,6 +371,7 @@ class MatchView:
     p2_dice_sum: int = 0
     p1_dice_cnt: int = 0
     p2_dice_cnt: int = 0
+
 
 def row_to_match(row: Optional[Mapping[str, Any]]) -> Optional['MatchView']:
     if not row:
@@ -335,15 +394,22 @@ def row_to_match(row: Optional[Mapping[str, Any]]) -> Optional['MatchView']:
         p2_dice_cnt=int(row.get("p2_dice_cnt", 0)),
     )
 
+
 def link_user(user_id: int) -> str:
     return f"<a href='tg://user?id={user_id}'>игрок</a>"
 
+
 # выбранный режим на пользователя
 user_mode: Dict[int, str] = {}  # uid -> 'slots' | 'dice3'
+
+
 def get_user_mode(uid: int) -> str:
     return user_mode.get(uid, DEFAULT_MODE)
+
+
 def set_user_mode(uid: int, mode: str):
     user_mode[uid] = mode
+
 
 def inline_menu(in_queue: bool, in_match: bool, mode: str = "slots") -> InlineKeyboardMarkup:
     buttons = []
@@ -359,6 +425,7 @@ def inline_menu(in_queue: bool, in_match: bool, mode: str = "slots") -> InlineKe
     buttons.append([InlineKeyboardButton(text="💳 Пополнить баланс", callback_data="topup_open")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+
 def stake_keyboard() -> InlineKeyboardMarkup:
     rows = [
         [("10⭐", "stake_10"), ("25⭐", "stake_25"), ("50⭐", "stake_50")],
@@ -368,6 +435,7 @@ def stake_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text=t, callback_data=cb) for t, cb in row] for row in rows]
     )
+
 
 def topup_keyboard() -> InlineKeyboardMarkup:
     rows = [
@@ -379,9 +447,11 @@ def topup_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[[InlineKeyboardButton(text=t, callback_data=cb) for t, cb in row] for row in rows]
     )
 
+
 def is_forwarded(msg: Message) -> bool:
     # если сообщение переслано — у него есть forward_date / forward_origin
     return bool(getattr(msg, "forward_date", None) or getattr(msg, "forward_origin", None))
+
 
 # ==================== GLOBALS ====================
 db = DB(DATABASE_URL)
@@ -392,6 +462,7 @@ dp.include_router(payments_router)
 
 last_spin_time: Dict[int, float] = {}
 cooldown_tasks: Dict[int, asyncio.Task] = {}
+
 
 # ==================== VISUAL COOLDOWN ====================
 async def show_cooldown(chat_id: int, user_id: int, seconds: int = COOLDOWN_SEC):
@@ -424,17 +495,21 @@ async def show_cooldown(chat_id: int, user_id: int, seconds: int = COOLDOWN_SEC)
 
     cooldown_tasks[user_id] = asyncio.create_task(_runner())
 
+
 def cooldown_ready(user_id: int) -> bool:
     now = time.time()
     return (now - last_spin_time.get(user_id, 0)) >= COOLDOWN_SEC
 
+
 def mark_cooldown(user_id: int):
     last_spin_time[user_id] = time.time()
+
 
 # ==================== SLOT DECODER (правильный) ====================
 # Telegram slot value: 1..64, где value-1 раскладывается в base-4
 # 0=bar, 1=grapes, 2=lemon, 3=seven
 SYMBOLS = ("bar", "grapes", "lemon", "seven")
+
 
 def combo_parts(value: int) -> Tuple[str, str, str]:
     v = value - 1
@@ -443,14 +518,18 @@ def combo_parts(value: int) -> Tuple[str, str, str]:
     right = SYMBOLS[(v // 16) % 4]
     return (left, center, right)
 
+
 def is_triple_bar(value: int) -> bool:
     return value == 1  # bar-bar-bar
+
 
 def is_triple_lemon(value: int) -> bool:
     return value == 43  # lemon-lemon-lemon
 
+
 def is_jackpot_777(value: int) -> bool:
     return value == 64  # seven-seven-seven
+
 
 # ==================== PAY / AUTO-DEBIT ====================
 async def try_auto_pay_and_invoice(match_id: int, uid: int, stake: int):
@@ -499,11 +578,36 @@ async def try_auto_pay_and_invoice(match_id: int, uid: int, stake: int):
         prices=prices,
         request_timeout=45,
     )
-    await bot.send_message(uid, f"💳 Выставлен счёт на недостающие {remaining} ⭐. После оплаты матч стартует автоматически.")
+    await bot.send_message(uid,
+                           f"💳 Выставлен счёт на недостающие {remaining} ⭐. После оплаты матч стартует автоматически.")
+
 
 # ==================== COMMANDS ====================
 @dp.message(Command("start"))
 async def cmd_start(m: Message):
+    # --- разбор payload вида: /start ref_<id> ---
+    payload = ""
+    try:
+        parts = m.text.split(maxsplit=1)
+        if len(parts) > 1:
+            payload = parts[1].strip()
+    except Exception:
+        pass
+
+    if payload.startswith("ref_"):
+        try:
+            ref_id = int(payload[4:])
+            if ref_id != m.from_user.id:
+                db.set_referrer_if_empty(m.from_user.id, ref_id)
+                # мягкое подтверждение (не мешаем UI)
+                try:
+                    await m.answer(
+                        f"✅ Реферальная метка установлена. Сыграй первый оплаченный матч — и другу начислятся +{REF_REWARD}⭐.")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     mv = row_to_match(db.get_match_by_user(m.from_user.id))
     kb = inline_menu(db.in_queue(m.from_user.id), bool(mv and not mv.winner_id), mode=get_user_mode(m.from_user.id))
     text = (
@@ -524,6 +628,22 @@ async def cmd_start(m: Message):
 
     await m.answer(text, reply_markup=kb, disable_web_page_preview=True)
 
+
+@dp.message(Command("ref"))
+async def cmd_ref(m: Message):
+    me = await bot.get_me()
+    username = me.username
+    link = f"https://t.me/{username}?start=ref_{m.from_user.id}"
+    total, rewarded = db.count_referrals(m.from_user.id)
+    text = (
+        "👥 Реферальная программа\n"
+        "Пригласите друга по вашей ссылке. Как только он ОДИН РАЗ оплатит и начнёт матч — вы получаете бонус.\n\n"
+        f"🔗 Ваша ссылка:\n{link}\n\n"
+        f"📈 Пришло: {total} • Начисления получены: {rewarded}\n"
+        f"Награда: {REF_REWARD}⭐ за каждого активированного друга."
+    )
+    await m.answer(text, disable_web_page_preview=True)
+
 @dp.message(Command("mode"))
 async def cmd_mode(m: Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -532,10 +652,12 @@ async def cmd_mode(m: Message):
     ])
     await m.answer("Выбери игровой режим:", reply_markup=kb)
 
+
 @dp.message(Command("balance"))
 async def cmd_balance(m: Message):
     bal = db.get_balance(m.from_user.id)
     await m.answer(f"Твой призовой баланс: {bal} ⭐️")
+
 
 @dp.message(Command("withdraw"))
 async def cmd_withdraw(m: Message):
@@ -551,25 +673,32 @@ async def cmd_withdraw(m: Message):
     )
     await m.answer(text, parse_mode="Markdown")
 
+
 @dp.message(Command("paysupport"))
 async def cmd_support(m: Message):
-    await m.answer("Поддержка по платежам: опиши проблему, приложи ID оплаты и скрин. Возможен refund по правилам Stars.")
+    await m.answer(
+        "Поддержка по платежам: опиши проблему, приложи ID оплаты и скрин. Возможен refund по правилам Stars.")
+
 
 @dp.message(Command("join"))
 async def cmd_join(m: Message):
     await m.answer("Выбери ставку для матча:", reply_markup=stake_keyboard())
 
+
 @dp.message(Command("leave"))
 async def cmd_leave(m: Message):
     await queue_leave_impl(m.from_user.id, m)
+
 
 @dp.message(Command("topup"))
 async def cmd_topup(m: Message):
     await m.answer("Выбери сумму пополнения:", reply_markup=topup_keyboard())
 
+
 # ==================== CALLBACKS: RULES / QUEUE / TOPUP / MODES ====================
 def stake_from_cb(data: str) -> int:
     return int(data.split("_")[1])
+
 
 @dp.callback_query(F.data == "rules")
 async def cb_rules(cq: CallbackQuery):
@@ -584,6 +713,7 @@ async def cb_rules(cq: CallbackQuery):
         "• Приз зачисляется на внутренний баланс."
     )
 
+
 @dp.callback_query(F.data == "modes_open")
 async def cb_modes_open(cq: CallbackQuery):
     await cq.answer()
@@ -592,6 +722,7 @@ async def cb_modes_open(cq: CallbackQuery):
         [InlineKeyboardButton(text=MODE_LABEL["dice3"], callback_data="mode_dice3")],
     ])
     await cq.message.answer("Выбери режим игры:", reply_markup=kb)
+
 
 @dp.callback_query(F.data.in_(["mode_slots", "mode_dice3"]))
 async def cb_set_mode(cq: CallbackQuery):
@@ -602,15 +733,18 @@ async def cb_set_mode(cq: CallbackQuery):
     kb = inline_menu(db.in_queue(cq.from_user.id), bool(mv and not mv.winner_id), mode=mode)
     await cq.message.answer(f"Режим установлен: {MODE_LABEL[mode]}", reply_markup=kb)
 
+
 @dp.callback_query(F.data == "queue_join")
 async def cb_queue_join(cq: CallbackQuery):
     await cq.answer()
     await cq.message.answer("Выбери ставку для матча:", reply_markup=stake_keyboard())
 
+
 @dp.callback_query(F.data == "queue_leave")
 async def cb_queue_leave(cq: CallbackQuery):
     await cq.answer()
     await queue_leave_impl(cq.from_user.id, cq.message)
+
 
 @dp.callback_query(F.data.startswith("stake_"))
 async def cb_stake(cq: CallbackQuery):
@@ -655,14 +789,31 @@ async def cb_stake(cq: CallbackQuery):
                 last_spin_time.pop(mv2.p2_id, None)
 
             text = (
-                f"Матч начался! Режим {MODE_LABEL[mode]}. "
-                f"Ставка {mv2.stake} ⭐ (комиссия {FEE_PCT}%). "
-                f"Приз: {prize_after_fee(mv2.stake)} ⭐. "
-                + ("Отправляй 🎰." if mode == "slots" else "Отправляй 🎲.")
+                    f"Матч начался! Режим {MODE_LABEL[mode]}. "
+                    f"Ставка {mv2.stake} ⭐ (комиссия {FEE_PCT}%). "
+                    f"Приз: {prize_after_fee(mv2.stake)} ⭐. "
+                    + ("Отправляй 🎰." if mode == "slots" else "Отправляй 🎲.")
             )
             await bot.send_message(mv2.p1_id, text)
             if mv2.p2_id:
                 await bot.send_message(mv2.p2_id, text)
+
+            # 👇 Реферальная награда: пробуем активировать для обоих игроков
+            for pid in (mv2.p1_id, mv2.p2_id):
+                if not pid:
+                    continue
+                referrer = db.award_referral_if_eligible(pid)
+                if referrer:
+                    try:
+                        await bot.send_message(
+                            referrer,
+                            f"🎁 +{REF_REWARD}⭐ за друга {link_user(pid)}! Спасибо за приглашение.",
+                            parse_mode="HTML"
+                        )
+                    except Exception:
+                        pass
+
+
         else:
             # Матч создан, ждём оплату (не добавляем в очередь!)
             await bot.send_message(uid, "🧾 Счёт выставлен. Оплати ставку — матч стартует автоматически.")
@@ -673,18 +824,18 @@ async def cb_stake(cq: CallbackQuery):
         await cq.message.answer(f"Ты в очереди на {MODE_LABEL[mode]} со ставкой {stake} ⭐. Ждём соперника!")
 
 
-
-
 @dp.callback_query(F.data == "topup_open")
 async def cb_topup_open(cq: CallbackQuery):
     await cq.answer()
     await cq.message.answer("Выбери сумму пополнения:", reply_markup=topup_keyboard())
+
 
 def parse_topup_amount(data: str) -> Optional[int]:
     try:
         return int(data.split("_")[1])
     except Exception:
         return None
+
 
 @dp.callback_query(F.data.startswith("topup_"))
 async def cb_topup(cq: CallbackQuery):
@@ -706,6 +857,7 @@ async def cb_topup(cq: CallbackQuery):
         prices=prices,
         request_timeout=45,
     )
+
 
 # ==================== QUEUE LEAVE ====================
 async def queue_leave_impl(uid: int, where: Message):
@@ -737,10 +889,12 @@ async def queue_leave_impl(uid: int, where: Message):
         return await where.answer("Матч уже идёт — выход невозможен.")
     await where.answer("Ты не в очереди и не в матче.")
 
+
 # ==================== PAYMENTS (STARS) ====================
 @payments_router.pre_checkout_query()
 async def pre_checkout(q: PreCheckoutQuery):
     await q.answer(ok=True)
+
 
 @payments_router.message(F.successful_payment)
 async def on_success_payment(m: Message):
@@ -777,14 +931,29 @@ async def on_success_payment(m: Message):
                     if mv.p2_id:
                         last_spin_time.pop(mv.p2_id, None)
                     text = (
-                        f"Матч начался! Режим {MODE_LABEL[mv.game_mode]}. "
-                        f"Ставка {mv.stake} ⭐ (комиссия {FEE_PCT}%). "
-                        f"Приз: {prize_after_fee(mv.stake)} ⭐. "
-                        + ("Отправляй 🎰." if mv.game_mode == "slots" else "Отправляй 🎲.")
+                            f"Матч начался! Режим {MODE_LABEL[mv.game_mode]}. "
+                            f"Ставка {mv.stake} ⭐ (комиссия {FEE_PCT}%). "
+                            f"Приз: {prize_after_fee(mv.stake)} ⭐. "
+                            + ("Отправляй 🎰." if mv.game_mode == "slots" else "Отправляй 🎲.")
                     )
                     await bot.send_message(mv.p1_id, text)
                     if mv.p2_id:
                         await bot.send_message(mv.p2_id, text)
+
+                    # 👇 Реферальная награда при старте после пополнения
+                    for pid in (mv.p1_id, mv.p2_id):
+                        if not pid:
+                            continue
+                        referrer = db.award_referral_if_eligible(pid)
+                        if referrer:
+                            try:
+                                await bot.send_message(
+                                    referrer,
+                                    f"🎁 +{REF_REWARD}⭐ за друга {link_user(pid)}! Спасибо за приглашение.",
+                                    parse_mode="HTML"
+                                )
+                            except Exception:
+                                pass
 
         return
 
@@ -819,21 +988,37 @@ async def on_success_payment(m: Message):
             mv = row_to_match(row)
             mode = mv.game_mode if mv else "slots"
             text = (
-                f"Матч начался! Режим {MODE_LABEL.get(mode, mode)}. "
-                f"Ставка {stake} ⭐ (комиссия {FEE_PCT}%). "
-                f"Приз: {prize_after_fee(stake)} ⭐. "
-                + ("Отправляй 🎰." if mode == "slots" else "Отправляй 🎲.")
+                    f"Матч начался! Режим {MODE_LABEL.get(mode, mode)}. "
+                    f"Ставка {stake} ⭐ (комиссия {FEE_PCT}%). "
+                    f"Приз: {prize_after_fee(stake)} ⭐. "
+                    + ("Отправляй 🎰." if mode == "slots" else "Отправляй 🎲.")
             )
             await bot.send_message(p1_id, text)
             if p2_id:
                 await bot.send_message(p2_id, text)
+
+            # 👇 Реферальная награда при старте после доплаты
+            for pid in (p1_id, p2_id):
+                if not pid:
+                    continue
+                referrer = db.award_referral_if_eligible(pid)
+                if referrer:
+                    try:
+                        await bot.send_message(
+                            referrer,
+                            f"🎁 +{REF_REWARD}⭐ за друга {link_user(pid)}! Спасибо за приглашение.",
+                            parse_mode="HTML"
+                        )
+                    except Exception:
+                        pass
+
+
         else:
             await m.answer("✅ Оплата принята. Ожидаем соперника.")
         return
 
     # 3) Старые payload-ы (совместимость)
     await m.answer("Оплата получена. Если это пополнение — пожалуйста, используйте /topup в следующий раз.")
-
 
 
 # ==================== GAME: user-sent 🎰 (SLOTS) ====================
@@ -906,9 +1091,12 @@ async def handle_any_dice(m: Message):
     p1_cnt, p2_cnt = int(st["p1_dice_cnt"]), int(st["p2_dice_cnt"])
 
     try:
-        await bot.send_message(uid, f"🎲 тебе выпало: {val}. Броски: {p1_cnt}/3 vs {p2_cnt}/3. Сумма: {p1_sum} vs {p2_sum}.")
+        await bot.send_message(uid,
+                               f"🎲 тебе выпало: {val}. Броски: {p1_cnt}/3 vs {p2_cnt}/3. Сумма: {p1_sum} vs {p2_sum}.")
         if opponent_id:
-            await bot.send_message(opponent_id, f"🎲 у соперника выпало: {val}. Броски: {p1_cnt}/3 vs {p2_cnt}/3. Сумма: {p1_sum} vs {p2_sum}.", parse_mode="HTML")
+            await bot.send_message(opponent_id,
+                                   f"🎲 у соперника выпало: {val}. Броски: {p1_cnt}/3 vs {p2_cnt}/3. Сумма: {p1_sum} vs {p2_sum}.",
+                                   parse_mode="HTML")
     except Exception:
         pass
 
@@ -919,8 +1107,6 @@ async def handle_any_dice(m: Message):
             return await on_win(mv.p2_id, mv)
         else:
             return await on_draw_sum(mv, p1_sum)
-
-
 
 
 # ==================== WIN / DRAW LOGIC ====================
@@ -948,6 +1134,7 @@ async def on_win(winner_id: int, mv: MatchView):
             await bot.send_message(mv.p2_id, announce, parse_mode="HTML")
     except Exception:
         pass
+
 
 async def on_draw_lemon(mv: MatchView):
     # ничья на 🍋🍋🍋: закрываем матч и возвращаем каждому stake - fee%
@@ -984,6 +1171,7 @@ async def on_draw_lemon(mv: MatchView):
     except Exception:
         pass
 
+
 async def on_draw_sum(mv: MatchView, total: int):
     db.set_winner_and_close(mv.id, winner_id=0)
     refund = refund_each_after_fee(mv.stake)
@@ -1006,6 +1194,7 @@ async def on_draw_sum(mv: MatchView, total: int):
             )
         except Exception:
             pass
+
 
 # ==================== ADMIN ====================
 @dp.message(Command("addstars"))
@@ -1031,6 +1220,7 @@ async def cmd_addstars(m: Message):
     except Exception:
         pass
 
+
 @dp.message(Command("allbalances"))
 async def cmd_allbalances(m: Message):
     if not is_admin(m.from_user.id):
@@ -1045,9 +1235,11 @@ async def cmd_allbalances(m: Message):
         lines.append(f"👤 {link_user(r['user_id'])} — {r['balance']} ⭐️")
     await m.answer("\n".join(lines), parse_mode="HTML")
 
+
 @dp.message(Command("whoami"))
 async def cmd_whoami(m: Message):
     await m.answer(f"Твой user_id: {m.from_user.id}\nАдмины: {sorted(ADMIN_IDS)}")
+
 
 @dp.message(Command("envcheck"))
 async def cmd_envcheck(m: Message):
@@ -1055,9 +1247,11 @@ async def cmd_envcheck(m: Message):
         return await m.answer("⛔ Доступ запрещён.")
     await m.answer(f"Загружены ADMIN_IDS: {sorted(ADMIN_IDS)}")
 
+
 # ==================== ENTRY ====================
 if __name__ == "__main__":
     async def main():
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+
 
     asyncio.run(main())
