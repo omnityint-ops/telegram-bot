@@ -496,6 +496,10 @@ dp.include_router(payments_router)
 
 # кэш username бота (чтобы не вызывать get_me() в хэндлерах)
 BOT_USERNAME: Optional[str] = None
+# таймеры/кулдауны — должны существовать на уровне модуля ДО первых хэндлеров
+last_spin_time: Dict[int, float] = {}
+cooldown_tasks: Dict[int, asyncio.Task] = {}
+
 
 
 
