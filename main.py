@@ -2,7 +2,7 @@ import os
 import time
 import asyncio
 from dataclasses import dataclass
-from typing import Optional, Dict, Tuple, Mapping, Any 
+from typing import Optional, Dict, Tuple, Mapping, Any
 
 import psycopg
 from psycopg.rows import dict_row
@@ -110,6 +110,7 @@ class DB:
             cur.execute("ALTER TABLE matches ADD COLUMN IF NOT EXISTS p2_dice_cnt INTEGER NOT NULL DEFAULT 0;")
             cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS referrer_id BIGINT;")
             cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS ref_rewarded BOOLEAN NOT NULL DEFAULT FALSE;")
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS has_played BOOLEAN NOT NULL DEFAULT FALSE;")
 
     # ---- Users / Balance ----
     def get_balance(self, user_id: int) -> int:
@@ -351,6 +352,81 @@ class DB:
         self.add_balance(ref_id, REF_REWARD)
         self.mark_ref_rewarded(user_id)
         return ref_id
+
+    def get_user_flags(self, user_id: int) -> Tuple[bool, Optional[int], bool]:
+        """
+        Возвращает (has_played, referrer_id, ref_rewarded)
+        """
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT has_played, referrer_id, ref_rewarded FROM users WHERE user_id=%s", (user_id,))
+            row = cur.fetchone()
+            if not row:
+                return (False, None, False)
+            return (bool(row["has_played"]), row["referrer_id"], bool(row["ref_rewarded"]))
+
+    def set_referrer_if_eligible(self, user_id: int, referrer_id: int) -> Tuple[bool, str]:
+        """
+        Пытается установить реферера.
+        Условия:
+          - нельзя на самого себя
+          - нельзя, если пользователь уже играл (has_played=TRUE)
+          - нельзя, если реферер уже установлен
+        Возвращает (ok, reason) — ok=False и reason ∈ {"self","played","exists","error"}
+        """
+        if user_id == referrer_id:
+            return False, "self"
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT has_played, referrer_id FROM users WHERE user_id=%s", (user_id,))
+                row = cur.fetchone()
+                if not row:
+                    # создаём нового с referrer_id
+                    cur.execute(
+                        "INSERT INTO users(user_id, balance, referrer_id, has_played) VALUES(%s, 0, %s, FALSE)",
+                        (user_id, referrer_id),
+                    )
+                    return True, ""
+                has_played = bool(row["has_played"])
+                current_ref = row["referrer_id"]
+                if has_played:
+                    return False, "played"
+                if current_ref is not None:
+                    return False, "exists"
+                # можно установить
+                cur.execute("UPDATE users SET referrer_id=%s WHERE user_id=%s AND referrer_id IS NULL", (referrer_id, user_id))
+                return True, ""
+        except Exception:
+            return False, "error"
+
+    def mark_played_and_maybe_award(self, user_id: int) -> Optional[int]:
+        """
+        Помечает пользователя как сыгравшего (только один раз — при ПЕРВОМ старте оплаченного матча).
+        Если это первый раз и есть referrer_id, и ref_rewarded=FALSE — начисляет рефереру +REF_REWARD
+        и помечает ref_rewarded=TRUE.
+        Возвращает referrer_id, если была выплата; иначе None.
+        """
+        with self.conn.cursor() as cur:
+            # ставим has_played=TRUE только если раньше было FALSE, и сразу получаем ref_* флаги
+            cur.execute("""
+                UPDATE users
+                   SET has_played=TRUE
+                 WHERE user_id=%s AND has_played=FALSE
+             RETURNING referrer_id, ref_rewarded
+            """, (user_id,))
+            row = cur.fetchone()
+            if not row:
+                # уже играл раньше — ничего не платим
+                return None
+            ref_id = row["referrer_id"]
+            rewarded = bool(row["ref_rewarded"])
+            if ref_id and not rewarded:
+                # платим рефереру и помечаем
+                cur.execute("UPDATE users SET ref_rewarded=TRUE WHERE user_id=%s", (user_id,))
+                # используем существующий метод пополнения
+                self.add_balance(ref_id, REF_REWARD)
+                return int(ref_id)
+            return None
+
 
 
 # ==================== MODELS / HELPERS ====================
@@ -636,19 +712,34 @@ async def cmd_start(m: Message):
     if payload.startswith("ref_"):
         try:
             ref_id = int(payload[4:])
-            if ref_id != m.from_user.id:
-                db.set_referrer_if_empty(m.from_user.id, ref_id)
-                # мягкое подтверждение (не мешаем UI)
-                try:
+            # пытаемся назначить реферера по новым правилам
+            ok, reason = db.set_referrer_if_eligible(m.from_user.id, ref_id)
+            try:
+                if ok:
                     await m.answer(
-                        f"✅ Реферальная метка установлена. Сыграй первый оплаченный матч — и другу начислятся +{REF_REWARD}⭐.")
-                except Exception:
-                    pass
+                        f"✅ Реферальная метка установлена. Сыграй первый оплаченный матч — и другу начислятся +{REF_REWARD}⭐."
+                    )
+                else:
+                    if reason == "self":
+                        await m.answer("❌ Нельзя приглашать самого себя.")
+                    elif reason == "played":
+                        await m.answer("❌ Реферальную метку нельзя поставить: ты уже играл в боте.")
+                    elif reason == "exists":
+                        await m.answer("❌ Реферальная метка уже установлена ранее.")
+                    else:
+                        await m.answer("❌ Не удалось установить реферальную метку. Попробуй позже.")
+            except Exception:
+                pass
         except Exception:
+            # некорректный ref_ payload — игнорируем тихо
             pass
 
     mv = row_to_match(db.get_match_by_user(m.from_user.id))
-    kb = inline_menu(db.in_queue(m.from_user.id), bool(mv and not mv.winner_id), mode=get_user_mode(m.from_user.id))
+    kb = inline_menu(
+        db.in_queue(m.from_user.id),
+        bool(mv and not mv.winner_id),
+        mode=get_user_mode(m.from_user.id),
+    )
     text = (
         "🎰 PVP-Game 1v1!\n\n"
         "Режимы:\n"
@@ -660,12 +751,11 @@ async def cmd_start(m: Message):
         "3) После старта матча:\n"
         "   • в режиме 🎰 — просто отправляй эмодзи 🎰;\n"
         "   • в режиме 🎲 — просто отправляй эмодзи 🎲.\n"
-        "4) КД между бросками — 5 сек.\n\n"
+        f"4) КД между бросками — {COOLDOWN_SEC} сек.\n\n"
         "Удачи на Арене!"
     )
-
-
     await m.answer(text, reply_markup=kb, disable_web_page_preview=True)
+
 
 
 @dp.message(Command("ref"))
@@ -872,7 +962,7 @@ async def cb_stake(cq: CallbackQuery):
             for pid in (mv2.p1_id, mv2.p2_id):
                 if not pid:
                     continue
-                referrer = db.award_referral_if_eligible(pid)
+                referrer = db.mark_played_and_maybe_award(pid)
                 if referrer:
                     try:
                         await bot.send_message(
@@ -1021,22 +1111,24 @@ async def on_success_payment(m: Message):
                         await bot.send_message(mv.p2_id, text)
 
                     # 👇 Реферальная награда при старте после пополнения
+                    # 👇 Реферальная награда только за ПЕРВЫЙ оплаченный старт приглашённого
                     for pid in (mv.p1_id, mv.p2_id):
                         if not pid:
                             continue
-                        referrer = db.award_referral_if_eligible(pid)
+                        referrer = db.mark_played_and_maybe_award(pid)
                         if referrer:
                             try:
                                 await bot.send_message(
                                     referrer,
                                     f"🎁 +{REF_REWARD}⭐ за друга {link_user(pid)}! Спасибо за приглашение.",
-                                    parse_mode="HTML"
+                                    parse_mode="HTML",
                                 )
                             except Exception:
                                 pass
 
         return
 
+    # 2) Доплата дефицита для матча
     # 2) Доплата дефицита для матча
     if payload.startswith("deficit:"):
         try:
@@ -1068,34 +1160,33 @@ async def on_success_payment(m: Message):
             mv = row_to_match(row)
             mode = mv.game_mode if mv else "slots"
             text = (
-                    f"Матч начался! Режим {MODE_LABEL.get(mode, mode)}. "
-                    f"Ставка {stake} ⭐ (комиссия {FEE_PCT}%). "
-                    f"Приз: {prize_after_fee(stake)} ⭐. "
-                    + ("Отправляй 🎰." if mode == "slots" else "Отправляй 🎲.")
+                f"Матч начался! Режим {MODE_LABEL.get(mode, mode)}. "
+                f"Ставка {stake} ⭐ (комиссия {FEE_PCT}%). "
+                f"Приз: {prize_after_fee(stake)} ⭐. "
+                + ("Отправляй 🎰." if mode == "slots" else "Отправляй 🎲.")
             )
             await bot.send_message(p1_id, text)
             if p2_id:
                 await bot.send_message(p2_id, text)
 
-            # 👇 Реферальная награда при старте после доплаты
+            # 👇 Реферальная награда только за ПЕРВЫЙ оплаченный старт приглашённого
             for pid in (p1_id, p2_id):
                 if not pid:
                     continue
-                referrer = db.award_referral_if_eligible(pid)
+                referrer = db.mark_played_and_maybe_award(pid)
                 if referrer:
                     try:
                         await bot.send_message(
                             referrer,
                             f"🎁 +{REF_REWARD}⭐ за друга {link_user(pid)}! Спасибо за приглашение.",
-                            parse_mode="HTML"
+                            parse_mode="HTML",
                         )
                     except Exception:
                         pass
-
-
         else:
             await m.answer("✅ Оплата принята. Ожидаем соперника.")
         return
+
 
     # 3) Старые payload-ы (совместимость)
     await m.answer("Оплата получена. Если это пополнение — пожалуйста, используйте /topup в следующий раз.")
@@ -1348,4 +1439,3 @@ if __name__ == "__main__":
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
     asyncio.run(main())
-
