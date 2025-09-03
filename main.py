@@ -37,8 +37,8 @@ def is_admin(uid: int) -> bool:
 # ==================== CONSTANTS ====================
 FEE_PCT = 10
 COOLDOWN_SEC = 5
-ALLOWED_STAKES = [10, 25, 50, 100, 250, 500, 1000]
-TOPUP_AMOUNTS = [10, 25, 50, 100, 250, 500, 1000]
+ALLOWED_STAKES = [15, 25, 50, 100, 250, 500, 1000]
+TOPUP_AMOUNTS = [15, 25, 50, 100, 250, 500, 1000]
 MIN_WITHDRAW = 400
 REF_REWARD = 10
 
@@ -428,7 +428,7 @@ def inline_menu(in_queue: bool, in_match: bool, mode: str = "slots") -> InlineKe
 
 def stake_keyboard() -> InlineKeyboardMarkup:
     rows = [
-        [("10⭐", "stake_10"), ("25⭐", "stake_25"), ("50⭐", "stake_50")],
+        [("15⭐", "stake_15"), ("25⭐", "stake_25"), ("50⭐", "stake_50")],
         [("100⭐", "stake_100"), ("250⭐", "stake_250")],
         [("500⭐", "stake_500"), ("1000⭐", "stake_1000")],
     ]
@@ -439,7 +439,7 @@ def stake_keyboard() -> InlineKeyboardMarkup:
 
 def topup_keyboard() -> InlineKeyboardMarkup:
     rows = [
-        [("10⭐", "topup_10"), ("25⭐", "topup_25"), ("50⭐", "topup_50")],
+        [("15⭐", "topup_15"), ("25⭐", "topup_25"), ("50⭐", "topup_50")],
         [("100⭐", "topup_100"), ("250⭐", "topup_250")],
         [("500⭐", "topup_500"), ("1000⭐", "topup_1000")],
     ]
