@@ -1141,11 +1141,12 @@ async def handle_any_dice(m: Message):
         try:
             # Ничего не пишем цифрами. Отправляем сопернику сам "бросок" как стикер/анимацию.
             if opponent_id:
-                await bot.copy_message(
+                await bot.forward_message(
                     chat_id=opponent_id,
                     from_chat_id=m.chat.id,
                     message_id=m.message_id
                 )
+
         except Exception:
             pass
 
