@@ -448,6 +448,34 @@ def topup_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+async def edit_or_send(
+    message: Message,
+    text: str,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+):
+    """
+    Пытаемся отредактировать текущее сообщение (с инлайн-кнопками).
+    Если редактировать нельзя (не наше/удалено/тот же текст) — отправляем новое.
+    Всегда используем HTML, чтобы корректно показывать link_user().
+    """
+    try:
+        await message.edit_text(
+            text,
+            reply_markup=reply_markup,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    except Exception:
+        await message.answer(
+            text,
+            reply_markup=reply_markup,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+
+
+
+
 def is_forwarded(msg: Message) -> bool:
     # если сообщение переслано — у него есть forward_date / forward_origin
     return bool(getattr(msg, "forward_date", None) or getattr(msg, "forward_origin", None))
@@ -703,7 +731,8 @@ def stake_from_cb(data: str) -> int:
 @dp.callback_query(F.data == "rules")
 async def cb_rules(cq: CallbackQuery):
     await cq.answer()
-    await cq.message.answer(
+    await edit_or_send(
+        cq.message,
         "Правила:\n"
         f"• Комиссия бота {FEE_PCT}%.\n"
         "• Режим 1 — 🎰 777: Победа — 777; BAR BAR BAR — проигрыш бросившего; 🍋🍋🍋 — ничья (возврат минус комиссия).\n"
@@ -714,6 +743,7 @@ async def cb_rules(cq: CallbackQuery):
     )
 
 
+
 @dp.callback_query(F.data == "modes_open")
 async def cb_modes_open(cq: CallbackQuery):
     await cq.answer()
@@ -721,7 +751,8 @@ async def cb_modes_open(cq: CallbackQuery):
         [InlineKeyboardButton(text=MODE_LABEL["slots"], callback_data="mode_slots")],
         [InlineKeyboardButton(text=MODE_LABEL["dice3"], callback_data="mode_dice3")],
     ])
-    await cq.message.answer("Выбери режим игры:", reply_markup=kb)
+    await edit_or_send(cq.message, "Выбери режим игры:", kb)
+
 
 
 @dp.callback_query(F.data.in_(["mode_slots", "mode_dice3"]))
@@ -731,13 +762,15 @@ async def cb_set_mode(cq: CallbackQuery):
     set_user_mode(cq.from_user.id, mode)
     mv = row_to_match(db.get_match_by_user(cq.from_user.id))
     kb = inline_menu(db.in_queue(cq.from_user.id), bool(mv and not mv.winner_id), mode=mode)
-    await cq.message.answer(f"Режим установлен: {MODE_LABEL[mode]}", reply_markup=kb)
+    await edit_or_send(cq.message, f"Режим установлен: {MODE_LABEL[mode]}", kb)
+
 
 
 @dp.callback_query(F.data == "queue_join")
 async def cb_queue_join(cq: CallbackQuery):
     await cq.answer()
-    await cq.message.answer("Выбери ставку для матча:", reply_markup=stake_keyboard())
+    await edit_or_send(cq.message, "Выбери ставку для матча:", stake_keyboard())
+
 
 
 @dp.callback_query(F.data == "queue_leave")
@@ -751,14 +784,14 @@ async def cb_stake(cq: CallbackQuery):
     await cq.answer()
     stake = stake_from_cb(cq.data)
     if stake not in ALLOWED_STAKES:
-        return await cq.message.answer("Некорректная ставка.")
+        return await edit_or_send(cq.message, "Некорректная ставка.")
 
     uid = cq.from_user.id
     mode = get_user_mode(uid)
 
     mv = row_to_match(db.get_match_by_user(uid))
     if mv and mv.active:
-        return await cq.message.answer("Ты уже в активном матче.")
+        return await edit_or_send(cq.message, "Ты уже в активном матче.")
 
     if db.in_queue(uid):
         db.remove_from_queue(uid)
@@ -766,10 +799,14 @@ async def cb_stake(cq: CallbackQuery):
     opp = db.pop_any_from_queue(exclude_user_id=uid, stake=stake, mode=mode)
     if opp:
         match_id = db.create_match(p1_id=opp, p2_id=uid, stake=stake, game_mode=mode)
-        await cq.message.answer(
+
+        # статус подбора — редактируем ТЕКУЩЕЕ сообщение
+        await edit_or_send(
+            cq.message,
             f"Найден соперник: {link_user(opp)}.\nРежим: {MODE_LABEL[mode]}\nГотовим старт матча…",
-            parse_mode="HTML",
         )
+
+        # оповещаем соперника отдельным сообщением
         await bot.send_message(
             opp,
             f"Подключился соперник: {link_user(uid)}.\nРежим: {MODE_LABEL[mode]}\nГотовим старт матча…",
@@ -780,10 +817,13 @@ async def cb_stake(cq: CallbackQuery):
         for pid in (uid, opp):
             await try_auto_pay_and_invoice(match_id, pid, stake)
 
+        # Если оба оплатили — стартуем матч
         if db.can_start(match_id):
             db.start_match(match_id)
             row2 = db.get_match_by_user(uid)
             mv2 = row_to_match(row2)
+
+            # сброс кулдаунов
             last_spin_time.pop(mv2.p1_id, None)
             if mv2.p2_id:
                 last_spin_time.pop(mv2.p2_id, None)
@@ -794,11 +834,16 @@ async def cb_stake(cq: CallbackQuery):
                     f"Приз: {prize_after_fee(mv2.stake)} ⭐. "
                     + ("Отправляй 🎰." if mode == "slots" else "Отправляй 🎲.")
             )
-            await bot.send_message(mv2.p1_id, text)
-            if mv2.p2_id:
-                await bot.send_message(mv2.p2_id, text)
 
-            # 👇 Реферальная награда: пробуем активировать для обоих игроков
+            # обновим ЭТО ЖЕ сообщение у инициатора
+            await edit_or_send(cq.message, text)
+
+            # уведомим только второго игрока (чтобы не дублировать инициатору)
+            notify_uid = mv2.p2_id if uid == mv2.p1_id else mv2.p1_id
+            if notify_uid:
+                await bot.send_message(notify_uid, text)
+
+            # реферальные бонусы
             for pid in (mv2.p1_id, mv2.p2_id):
                 if not pid:
                     continue
@@ -813,21 +858,22 @@ async def cb_stake(cq: CallbackQuery):
                     except Exception:
                         pass
 
-
         else:
-            # Матч создан, ждём оплату (не добавляем в очередь!)
+            # Матч создан, ждём оплату (сообщение сопернику/тебе — отдельные уведомления)
             await bot.send_message(uid, "🧾 Счёт выставлен. Оплати ставку — матч стартует автоматически.")
             await bot.send_message(opp, "🧾 Счёт выставлен. Оплати ставку — матч стартует автоматически.")
     else:
-        # Соперника нет — ставим в очередь
+        # Соперника нет — ставим в очередь и обновляем текущее сообщение
         db.add_to_queue(uid, stake, mode=mode)
-        await cq.message.answer(f"Ты в очереди на {MODE_LABEL[mode]} со ставкой {stake} ⭐. Ждём соперника!")
+        await edit_or_send(cq.message, f"Ты в очереди на {MODE_LABEL[mode]} со ставкой {stake} ⭐. Ждём соперника!")
+
 
 
 @dp.callback_query(F.data == "topup_open")
 async def cb_topup_open(cq: CallbackQuery):
     await cq.answer()
-    await cq.message.answer("Выбери сумму пополнения:", reply_markup=topup_keyboard())
+    await edit_or_send(cq.message, "Выбери сумму пополнения:", reply_markup=topup_keyboard())
+
 
 
 def parse_topup_amount(data: str) -> Optional[int]:
@@ -842,11 +888,13 @@ async def cb_topup(cq: CallbackQuery):
     await cq.answer()
     amt = parse_topup_amount(cq.data)
     if not amt or amt not in TOPUP_AMOUNTS:
-        return await cq.message.answer("Некорректная сумма пополнения.")
+        return await edit_or_send(cq.message, "Некорректная сумма пополнения.")
+
     uid = cq.from_user.id
     title = f"Пополнение баланса (+{amt}⭐)"
     description = f"Пополнение внутреннего баланса на {amt} ⭐."
     prices = [LabeledPrice(label=f"{amt}⭐", amount=amt)]
+
     await bot.send_invoice(
         chat_id=uid,
         title=title,
@@ -859,16 +907,19 @@ async def cb_topup(cq: CallbackQuery):
     )
 
 
+
 # ==================== QUEUE LEAVE ====================
 async def queue_leave_impl(uid: int, where: Message):
     mv = row_to_match(db.get_match_by_user(uid))
+
+    # Если в очереди — просто убираем и редактируем текущее сообщение
     if db.in_queue(uid):
         db.remove_from_queue(uid)
         kb = inline_menu(False, bool(mv and not mv.winner_id), mode=get_user_mode(uid))
-        return await where.answer("Ок, убрал из очереди.", reply_markup=kb)
+        return await edit_or_send(where, "Ок, убрал из очереди.", reply_markup=kb)
 
+    # Если матч создан, но ещё не стартовал — отменяем и возвращаем частичные списания
     if mv and not mv.active and not mv.winner_id:
-        # Возвращаем только то, что реально списали с баланса (частичные предоплаты)
         state = db.get_match_payment_state(mv.id)
         p1_deb = int(state["p1_balance_debited"]) if state else 0
         p2_deb = int(state["p2_balance_debited"]) if (state and mv.p2_id) else 0
@@ -879,15 +930,19 @@ async def queue_leave_impl(uid: int, where: Message):
             db.add_balance(mv.p2_id, p2_deb)
 
         db.set_winner_and_close(mv.id, winner_id=0)
-        await where.answer("Матч отменён до старта. Средства с баланса возвращены.")
+
+        await edit_or_send(where, "Матч отменён до старта. Средства с баланса возвращены.")
         other = mv.p2_id if uid == mv.p1_id else mv.p1_id
         if other:
             await bot.send_message(other, "Соперник покинул матч до старта. Вернись в очередь: /join")
         return
 
+    # Уже идёт — нельзя
     if mv and mv.active and not mv.winner_id:
-        return await where.answer("Матч уже идёт — выход невозможен.")
-    await where.answer("Ты не в очереди и не в матче.")
+        return await edit_or_send(where, "Матч уже идёт — выход невозможен.")
+
+    # Вообще ни там, ни тут
+    await edit_or_send(where, "Ты не в очереди и не в матче.")
 
 
 # ==================== PAYMENTS (STARS) ====================
