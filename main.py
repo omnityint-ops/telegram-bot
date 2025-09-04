@@ -947,7 +947,7 @@ async def cb_stake(cq: CallbackQuery):
 
             text = (
                     f"Матч начался! Режим {MODE_LABEL[mode]}. "
-                    f"Ставка {mv2.stake} ⭐ (комиссия {FEE_PCT}%). "
+                    f"Ставка {mv2.stake} ⭐"
                     f"Приз: {prize_after_fee(mv2.stake)} ⭐. "
                     + ("Отправляй 🎰." if mode == "slots" else "Отправляй 🎲.")
             )
@@ -1104,7 +1104,7 @@ async def on_success_payment(m: Message):
                         last_spin_time.pop(mv.p2_id, None)
                     text = (
                             f"Матч начался! Режим {MODE_LABEL[mv.game_mode]}. "
-                            f"Ставка {mv.stake} ⭐ (комиссия {FEE_PCT}%). "
+                            f"Ставка {mv.stake} ⭐"
                             f"Приз: {prize_after_fee(mv.stake)} ⭐. "
                             + ("Отправляй 🎰." if mv.game_mode == "slots" else "Отправляй 🎲.")
                     )
@@ -1163,7 +1163,7 @@ async def on_success_payment(m: Message):
             mode = mv.game_mode if mv else "slots"
             text = (
                 f"Матч начался! Режим {MODE_LABEL.get(mode, mode)}. "
-                f"Ставка {stake} ⭐ (комиссия {FEE_PCT}%). "
+                f"Ставка {stake} ⭐"
                 f"Приз: {prize_after_fee(stake)} ⭐. "
                 + ("Отправляй 🎰." if mode == "slots" else "Отправляй 🎲.")
             )
@@ -1332,9 +1332,13 @@ async def handle_any_dice(m: Message):
 # ==================== WIN / DRAW LOGIC ====================
 async def on_win(winner_id: int, mv: MatchView):
     db.set_winner_and_close(mv.id, winner_id)
-    db.add_balance(winner_id, prize_after_fee(mv.stake))
+    prize = prize_after_fee(mv.stake)
+    db.add_balance(winner_id, prize)
 
+    # Сброс КД и закрывашка для обоих
     for pid in (mv.p1_id, mv.p2_id):
+        if not pid:
+            continue
         last_spin_time.pop(pid, None)
         task = cooldown_tasks.get(pid)
         if task and not task.done():
@@ -1344,16 +1348,26 @@ async def on_win(winner_id: int, mv: MatchView):
         except Exception:
             pass
 
-    announce = (
-        f"🎉 Победитель: {link_user(winner_id)}!\n"
-        f"Приз зачислён: {prize_after_fee(mv.stake)} ⭐️ (ставка {mv.stake}⭐, комиссия {FEE_PCT}%)."
-    )
+    # Персональные анонсы
     try:
-        await bot.send_message(mv.p1_id, announce, parse_mode="HTML")
-        if mv.p2_id:
-            await bot.send_message(mv.p2_id, announce, parse_mode="HTML")
+        # победителю
+        await bot.send_message(
+            winner_id,
+            f"🎉 Ты победил!\nПриз зачислён: {prize} ⭐️",
+            parse_mode="HTML",
+        )
+
+        # проигравшему
+        loser_id = mv.p2_id if winner_id == mv.p1_id else mv.p1_id
+        if loser_id:
+            await bot.send_message(
+                loser_id,
+                f"🏁 Победил соперник: {link_user(winner_id)}.\nПриз: {prize} ⭐️",
+                parse_mode="HTML",
+            )
     except Exception:
         pass
+
 
 
 async def on_draw_lemon(mv: MatchView):
@@ -1374,7 +1388,7 @@ async def on_draw_lemon(mv: MatchView):
         try:
             await bot.send_message(
                 pid,
-                f"Матч завершён ничьёй 🍋🍋🍋.\nВозврат: {refund} ⭐ каждому (комиссия {FEE_PCT}% удержана).",
+                f"Матч завершён ничьёй 🍋🍋🍋.\nВозврат: {refund} ⭐",
                 reply_markup=ReplyKeyboardRemove(),
             )
         except Exception:
@@ -1383,7 +1397,7 @@ async def on_draw_lemon(mv: MatchView):
     try:
         txt = (
             f"🤝 Ничья: 🍋🍋🍋\n"
-            f"Каждый получил обратно по {refund} ⭐ (ставка {mv.stake}⭐, комиссия {FEE_PCT}%)."
+            f"Каждый получил обратно по {refund} ⭐"
         )
         await bot.send_message(mv.p1_id, txt)
         if mv.p2_id:
@@ -1409,7 +1423,7 @@ async def on_draw_sum(mv: MatchView, total: int):
         try:
             await bot.send_message(
                 pid,
-                f"🤝 Ничья по сумме ({total} : {total}). Возврат: {refund} ⭐ каждому (комиссия {FEE_PCT}% удержана).",
+                f"🤝 Ничья по сумме ({total} : {total}). Возврат: {refund} ⭐",
                 reply_markup=ReplyKeyboardRemove(),
             )
         except Exception:
