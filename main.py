@@ -111,6 +111,7 @@ class DB:
             cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS referrer_id BIGINT;")
             cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS ref_rewarded BOOLEAN NOT NULL DEFAULT FALSE;")
             cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS has_played BOOLEAN NOT NULL DEFAULT FALSE;")
+            cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS banned BOOLEAN NOT NULL DEFAULT FALSE;")
 
     # ---- Users / Balance ----
     def get_balance(self, user_id: int) -> int:
@@ -427,6 +428,17 @@ class DB:
                 return int(ref_id)
             return None
 
+def ban_user(self, user_id: int):
+    with self.conn.cursor() as cur:
+        cur.execute("UPDATE users SET banned=TRUE WHERE user_id=%s", (user_id,))
+
+def is_banned(self, user_id: int) -> bool:
+    with self.conn.cursor() as cur:
+        cur.execute("SELECT banned FROM users WHERE user_id=%s", (user_id,))
+        row = cur.fetchone()
+        return bool(row and row["banned"])
+
+
 
 
 # ==================== MODELS / HELPERS ====================
@@ -700,6 +712,8 @@ async def try_auto_pay_and_invoice(match_id: int, uid: int, stake: int):
 # ==================== COMMANDS ====================
 @dp.message(Command("start"))
 async def cmd_start(m: Message):
+    if db.is_banned(m.from_user.id):
+        return await m.answer("⛔ Вы забанены. Обратитесь к администратору.")
     # --- разбор payload вида: /start ref_<id> ---
     payload = ""
     try:
@@ -823,7 +837,10 @@ async def cmd_support(m: Message):
 
 @dp.message(Command("join"))
 async def cmd_join(m: Message):
+    if db.is_banned(m.from_user.id):
+        return await m.answer("⛔ Вы забанены. Обратитесь к администратору.")
     await m.answer("Выбери ставку для матча:", reply_markup=stake_keyboard())
+    
 
 
 @dp.message(Command("leave"))
@@ -1232,6 +1249,28 @@ async def cmd_claim(m: Message):
     else:
         # оба ещё не завершили — нельзя
         return await m.answer("Оба игрока не завершили 3/3 — техпобеда пока невозможна.")
+
+@dp.message(Command("ban"))
+async def cmd_ban(m: Message):
+    if not is_admin(m.from_user.id):
+        return await m.answer("⛔ Нет доступа")
+
+    parts = m.text.split()
+    if len(parts) != 2:
+        return await m.answer("Формат: /ban <user_id>")
+
+    try:
+        uid = int(parts[1])
+    except ValueError:
+        return await m.answer("❌ user_id должен быть числом")
+
+    db.ban_user(uid)
+    await m.answer(f"✅ Игрок {uid} забанен")
+    try:
+        await bot.send_message(uid, "⛔ Вы забанены администратором. Дальнейшие игры недоступны.")
+    except Exception:
+        pass
+
 
 
 
