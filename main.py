@@ -428,15 +428,15 @@ class DB:
                 return int(ref_id)
             return None
 
-def ban_user(self, user_id: int):
-    with self.conn.cursor() as cur:
-        cur.execute("UPDATE users SET banned=TRUE WHERE user_id=%s", (user_id,))
+    def ban_user(self, user_id: int):
+        with self.conn.cursor() as cur:
+            cur.execute("UPDATE users SET banned=TRUE WHERE user_id=%s", (user_id,))
 
-def is_banned(self, user_id: int) -> bool:
-    with self.conn.cursor() as cur:
-        cur.execute("SELECT banned FROM users WHERE user_id=%s", (user_id,))
-        row = cur.fetchone()
-        return bool(row and row["banned"])
+    def is_banned(self, user_id: int) -> bool:
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT banned FROM users WHERE user_id=%s", (user_id,))
+            row = cur.fetchone()
+            return bool(row and row["banned"])
 
 
 
