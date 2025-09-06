@@ -16,6 +16,7 @@ from aiogram.types import (
 )
 from aiogram.enums.dice_emoji import DiceEmoji
 from dotenv import load_dotenv
+from aiogram import BaseMiddleware
 
 # ==================== ENV ====================
 load_dotenv()
@@ -59,6 +60,27 @@ MODE_LABEL = {
     "slots": "🎰 777",
     "dice3": "🎲 3 броска",
 }
+
+class BanMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        uid = None
+        if isinstance(event, Message):
+            uid = event.from_user.id if event.from_user else None
+        elif isinstance(event, CallbackQuery):
+            uid = event.from_user.id if event.from_user else None
+
+        if uid and not is_admin(uid) and db.is_banned(uid):
+            # Мягко глушим любые действия
+            if isinstance(event, Message):
+                try: await event.answer("⛔ Вы забанены. Обратитесь к администратору.")
+                except: pass
+            elif isinstance(event, CallbackQuery):
+                try:
+                    await event.answer("⛔ Вы забанены.", show_alert=True)
+                except: pass
+            return  # ничего дальше не обрабатываем
+
+        return await handler(event, data)
 
 
 # ==================== DB LAYER (Postgres) ====================
@@ -340,7 +362,6 @@ class DB:
             rewarded = int(cur.fetchone()["c"])
             return total, rewarded
 
-
     def award_referral_if_eligible(self, user_id: int) -> Optional[int]:
         """
         Если у user_id есть referrer_id и ещё не платили награду — платим рефереру +10⭐ и помечаем.
@@ -394,7 +415,8 @@ class DB:
                 if current_ref is not None:
                     return False, "exists"
                 # можно установить
-                cur.execute("UPDATE users SET referrer_id=%s WHERE user_id=%s AND referrer_id IS NULL", (referrer_id, user_id))
+                cur.execute("UPDATE users SET referrer_id=%s WHERE user_id=%s AND referrer_id IS NULL",
+                            (referrer_id, user_id))
                 return True, ""
         except Exception:
             return False, "error"
@@ -437,8 +459,6 @@ class DB:
             cur.execute("SELECT banned FROM users WHERE user_id=%s", (user_id,))
             row = cur.fetchone()
             return bool(row and row["banned"])
-
-
 
 
 # ==================== MODELS / HELPERS ====================
@@ -537,9 +557,9 @@ def topup_keyboard() -> InlineKeyboardMarkup:
 
 
 async def edit_or_send(
-    message: Message,
-    text: str,
-    reply_markup: Optional[InlineKeyboardMarkup] = None,
+        message: Message,
+        text: str,
+        reply_markup: Optional[InlineKeyboardMarkup] = None,
 ):
     """
     Пытаемся отредактировать текущее сообщение (с инлайн-кнопками).
@@ -562,8 +582,6 @@ async def edit_or_send(
         )
 
 
-
-
 def is_forwarded(msg: Message) -> bool:
     # если сообщение переслано — у него есть forward_date / forward_origin
     return bool(getattr(msg, "forward_date", None) or getattr(msg, "forward_origin", None))
@@ -581,14 +599,14 @@ bot = Bot(BOT_TOKEN, session=session)
 dp = Dispatcher()
 payments_router = Router()
 dp.include_router(payments_router)
+dp.message.middleware(BanMiddleware())
+dp.callback_query.middleware(BanMiddleware())
 
 # кэш username бота (чтобы не вызывать get_me() в хэндлерах)
 BOT_USERNAME: Optional[str] = None
 # таймеры/кулдауны — должны существовать на уровне модуля ДО первых хэндлеров
 last_spin_time: Dict[int, float] = {}
 cooldown_tasks: Dict[int, asyncio.Task] = {}
-
-
 
 
 # ==================== VISUAL COOLDOWN ====================
@@ -771,7 +789,6 @@ async def cmd_start(m: Message):
     await m.answer(text, reply_markup=kb, disable_web_page_preview=True)
 
 
-
 @dp.message(Command("ref"))
 async def cmd_ref(m: Message):
     global BOT_USERNAME
@@ -828,7 +845,6 @@ async def cmd_withdraw(m: Message):
     await m.answer(text, parse_mode="HTML")
 
 
-
 @dp.message(Command("paysupport"))
 async def cmd_support(m: Message):
     await m.answer(
@@ -840,7 +856,6 @@ async def cmd_join(m: Message):
     if db.is_banned(m.from_user.id):
         return await m.answer("⛔ Вы забанены. Обратитесь к администратору.")
     await m.answer("Выбери ставку для матча:", reply_markup=stake_keyboard())
-    
 
 
 @dp.message(Command("leave"))
@@ -876,8 +891,6 @@ async def cb_rules(cq: CallbackQuery):
     )
 
 
-
-
 @dp.callback_query(F.data == "modes_open")
 async def cb_modes_open(cq: CallbackQuery):
     await cq.answer()
@@ -886,7 +899,6 @@ async def cb_modes_open(cq: CallbackQuery):
         [InlineKeyboardButton(text=MODE_LABEL["dice3"], callback_data="mode_dice3")],
     ])
     await edit_or_send(cq.message, "Выбери режим игры:", kb)
-
 
 
 @dp.callback_query(F.data.in_(["mode_slots", "mode_dice3"]))
@@ -899,12 +911,10 @@ async def cb_set_mode(cq: CallbackQuery):
     await edit_or_send(cq.message, f"Режим установлен: {MODE_LABEL[mode]}", kb)
 
 
-
 @dp.callback_query(F.data == "queue_join")
 async def cb_queue_join(cq: CallbackQuery):
     await cq.answer()
     await edit_or_send(cq.message, "Выбери ставку для матча:", stake_keyboard())
-
 
 
 @dp.callback_query(F.data == "queue_leave")
@@ -915,6 +925,8 @@ async def cb_queue_leave(cq: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("stake_"))
 async def cb_stake(cq: CallbackQuery):
+    if db.is_banned(cq.from_user.id):
+        return await cq.answer("⛔ Вы забанены.", show_alert=True)
     await cq.answer()
     stake = stake_from_cb(cq.data)
     if stake not in ALLOWED_STAKES:
@@ -1002,12 +1014,10 @@ async def cb_stake(cq: CallbackQuery):
         await edit_or_send(cq.message, f"Ты в очереди на {MODE_LABEL[mode]} со ставкой {stake} ⭐. Ждём соперника!")
 
 
-
 @dp.callback_query(F.data == "topup_open")
 async def cb_topup_open(cq: CallbackQuery):
     await cq.answer()
     await edit_or_send(cq.message, "Выбери сумму пополнения:", reply_markup=topup_keyboard())
-
 
 
 def parse_topup_amount(data: str) -> Optional[int]:
@@ -1039,7 +1049,6 @@ async def cb_topup(cq: CallbackQuery):
         prices=prices,
         request_timeout=45,
     )
-
 
 
 # ==================== QUEUE LEAVE ====================
@@ -1179,10 +1188,10 @@ async def on_success_payment(m: Message):
             mv = row_to_match(row)
             mode = mv.game_mode if mv else "slots"
             text = (
-                f"Матч начался! Режим {MODE_LABEL.get(mode, mode)}. "
-                f"Ставка {stake} ⭐"
-                f"Приз: {prize_after_fee(stake)} ⭐. "
-                + ("Отправляй 🎰." if mode == "slots" else "Отправляй 🎲.")
+                    f"Матч начался! Режим {MODE_LABEL.get(mode, mode)}. "
+                    f"Ставка {stake} ⭐"
+                    f"Приз: {prize_after_fee(stake)} ⭐. "
+                    + ("Отправляй 🎰." if mode == "slots" else "Отправляй 🎲.")
             )
             await bot.send_message(p1_id, text)
             if p2_id:
@@ -1206,9 +1215,9 @@ async def on_success_payment(m: Message):
             await m.answer("✅ Оплата принята. Ожидаем соперника.")
         return
 
-
     # 3) Старые payload-ы (совместимость)
     await m.answer("Оплата получена. Если это пополнение — пожалуйста, используйте /topup в следующий раз.")
+
 
 @dp.message(Command("claim"))
 async def cmd_claim(m: Message):
@@ -1250,6 +1259,7 @@ async def cmd_claim(m: Message):
         # оба ещё не завершили — нельзя
         return await m.answer("Оба игрока не завершили 3/3 — техпобеда пока невозможна.")
 
+
 @dp.message(Command("ban"))
 async def cmd_ban(m: Message):
     if not is_admin(m.from_user.id):
@@ -1264,11 +1274,47 @@ async def cmd_ban(m: Message):
     except ValueError:
         return await m.answer("❌ user_id должен быть числом")
 
+    # 1) помечаем бан
     db.ban_user(uid)
+
+    # 2) убираем из очереди, если там
+    if db.in_queue(uid):
+        db.remove_from_queue(uid)
+
+    # 3) разбираем возможный матч
+    mv = row_to_match(db.get_match_by_user(uid))
+    if mv and not mv.winner_id:
+        if not mv.active:
+            # матч не стартовал → отмена и возвраты частичных дебетов
+            state = db.get_match_payment_state(mv.id)
+            p1_deb = int(state["p1_balance_debited"]) if state else 0
+            p2_deb = int(state["p2_balance_debited"]) if (state and mv.p2_id) else 0
+
+            if p1_deb > 0:
+                db.add_balance(mv.p1_id, p1_deb)
+            if mv.p2_id and p2_deb > 0:
+                db.add_balance(mv.p2_id, p2_deb)
+
+            db.set_winner_and_close(mv.id, winner_id=0)
+
+            other = mv.p2_id if uid == mv.p1_id else mv.p1_id
+            if other:
+                try:
+                    await bot.send_message(other, "Соперник забанен. Матч отменён, средства возвращены.")
+                except:
+                    pass
+
+        else:
+            # матч активен → отдать техпобеду оппоненту
+            other = mv.p2_id if uid == mv.p1_id else mv.p1_id
+            if other:
+                await on_win(other, mv)
+
+    # 4) уведомления
     await m.answer(f"✅ Игрок {uid} забанен")
     try:
-        await bot.send_message(uid, "⛔ Вы забанены администратором. Дальнейшие игры недоступны.")
-    except Exception:
+        await bot.send_message(uid, "⛔ Вы забанены администратором. Дальнейшие действия недоступны.")
+    except:
         pass
 
 
@@ -1277,6 +1323,8 @@ async def cmd_ban(m: Message):
 # ==================== GAME: user-sent 🎰 (SLOTS) ====================
 @dp.message(F.dice)
 async def handle_any_dice(m: Message):
+    if db.is_banned(m.from_user.id):
+        return await m.reply("⛔ Вы забанены.")
     # запрет на пересыл
     if is_forwarded(m):
         return await m.reply("❌ Пересылать чужие броски запрещено. Отправь свой 🎰/🎲.")
@@ -1322,7 +1370,6 @@ async def handle_any_dice(m: Message):
 
         except Exception:
             pass
-
 
         if is_jackpot_777(val):
             return await on_win(uid, mv)
@@ -1406,7 +1453,6 @@ async def on_win(winner_id: int, mv: MatchView):
             )
     except Exception:
         pass
-
 
 
 async def on_draw_lemon(mv: MatchView):
@@ -1533,5 +1579,6 @@ if __name__ == "__main__":
             BOT_USERNAME = None  # на всякий случай, чтобы не падать при старте
 
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+
 
     asyncio.run(main())
